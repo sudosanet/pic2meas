@@ -1,0 +1,7 @@
+allowBuilds:
+  esbuild: true
+  workerd: true
+  protobufjs: false
+minimumReleaseAgeExclude:
+  - vite@8.4.0
+  - lucide-react@1.81.0

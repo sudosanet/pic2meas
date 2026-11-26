@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ライセンス - pic2meas</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1f2937; --muted:#6b7280; --bg:#fff; --line:#e5e7eb; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --bg:#111827; --line:#374151; } }
+  body { margin:0 auto; max-width:760px; padding:24px 16px; font:15px/1.7 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+  h1 { font-size:1.4rem; } h2 { font-size:1.05rem; margin-top:2rem; }
+  table { border-collapse:collapse; width:100%; font-size:14px; } td, th { border-bottom:1px solid var(--line); padding:6px 4px; text-align:left; vertical-align:top; }
+  p.note { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<p><a href="/">← pic2meas に戻る</a></p>
+<h1>ライセンスと帰属表示</h1>
+<p><strong>pic2meas は、画像からの体型・服の寸法推定を研究・評価するための非商用ツールです。</strong>研究・評価以外の目的には使えません。使用しているモデルのライセンス（下記）も、研究・評価目的での非商用利用に限られています。</p>
+<p>画像の処理はすべて閲覧者のブラウザ内で行い、画像をサーバーへ送信しません。推定値は画像1枚からの推定で、実寸ではありません。利用は自己責任でお願いします。</p>
+
+<h2>モデル</h2>
+<table>
+  <tr><th>モデル</th><th>用途</th><th>ライセンス</th></tr>
+  <tr><td><a href="https://huggingface.co/mattmdjaga/segformer_b2_clothes">SegFormer B2 clothes</a>（ONNX 版: <a href="https://huggingface.co/Xenova/segformer_b2_clothes">Xenova/segformer_b2_clothes</a>）</td><td>服と人物の切り抜き</td><td><a href="/models/LICENSE-SegFormer.txt">NVIDIA Source Code License for SegFormer</a>（非商用）。学習データ: ATR データセット</td></tr>
+  <tr><td><a href="https://github.com/Naturalpad-studio/InstantHMR">InstantHMR</a> medium（fit2）</td><td>骨格と3D体型</td><td><a href="/models/LICENSE-InstantHMR-SAM.txt">SAM License</a>。medium の重みは学習データの条件により非商用に限る</td></tr>
+  <tr><td><a href="https://github.com/facebookresearch/MHR">MHR (Momentum Human Rig)</a>（mhr-body.onnx 内）</td><td>体型モデル</td><td><a href="/models/LICENSE-MHR.txt">Apache License 2.0</a></td></tr>
+</table>
+
+<h2>ソフトウェア</h2>
+<table>
+  <tr><td><a href="https://github.com/microsoft/onnxruntime">ONNX Runtime Web</a></td><td>MIT</td></tr>
+  <tr><td>React / React DOM</td><td>MIT</td></tr>
+  <tr><td>Konva / react-konva</td><td>MIT</td></tr>
+  <tr><td>Zustand / Comlink / react-dropzone / Hono</td><td>MIT / Apache-2.0 / MIT / MIT</td></tr>
+  <tr><td>Radix UI / shadcn/ui / lucide-react / Tailwind CSS</td><td>MIT / MIT / ISC / MIT</td></tr>
+</table>
+
+<h2>JIS のカップ表記について</h2>
+<p class="note">カップはトップバストとアンダーバストの差（AA 7.5cm から 2.5cm 刻み）、アンダーは 5cm 刻みの呼びで表しています。JIS L 4006 の考え方に沿ったメーカー各社の解説にもとづく目安です。</p>
+</body>
+</html>

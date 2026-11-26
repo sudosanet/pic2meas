@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pic2meas",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-20",
+  // モデルと onnxruntime の wasm は 25MiB を超えるので R2 から返す
+  "r2_buckets": [{ "binding": "MODELS", "bucket_name": "pic2meas-models" }],
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/models/*"]
+  }
+}
