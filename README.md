@@ -21,14 +21,9 @@ pnpm test
 
 ## デプロイ
 
-```sh
-pnpm exec wrangler login
-pnpm exec wrangler r2 bucket create pic2meas-models
-pnpm models --remote
-pnpm run deploy   # `pnpm deploy` は pnpm の別コマンドなので run を付ける
-```
+`main` に push すると Cloudflare Workers Builds がデプロイする（ビルド `pnpm build`、デプロイ `pnpm exec wrangler deploy`）。手動なら `pnpm run deploy`（`pnpm deploy` は pnpm の別コマンド）。
 
-モデルと onnxruntime の wasm は、静的アセットの上限 25MiB を超えるので R2 に置き、Worker が `/models/*` として返す。
+モデルと onnxruntime の wasm は 25MiB を超えるので R2 バケット `pic2meas-models` に置き、Worker が `/models/*` として返す。モデルを差し替えたら `pnpm models --remote`。
 
 ## ライセンス
 
