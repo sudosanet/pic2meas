@@ -164,29 +164,38 @@ const MIN_BUMP = 0.004;
  * lean outwards). x: the cap's position across the section (m); dz: its centre's offset from the section plane (m).
  */
 export function withCaps(hull: Float32Array, front: 1 | -1, caps: { x: number; dz: number; aM: number; h: number }[]) {
-  const pts = Array.from(hull), n = hull.length / 2;
-  for (const { x, dz, aM, h } of caps) {
-    if (h <= 0) continue;
-    const R = (aM * aM + h * h) / (2 * h), rr = R * R - dz * dz;
+  const pts = Array.from(hull);
+  for (const c of caps) {
+    const sph = capSphere(hull, front, c.x, c.aM, c.h);
+    if (!sph) continue;
+    const rr = sph.R * sph.R - c.dz * c.dz;
     if (rr <= 0) continue;
-    // The front wall at x: the most forward hull edge crossing x, and its outward normal.
-    let wall: { x: number; y: number; nx: number; ny: number } | null = null;
-    for (let i = 0; i < n; i++) {
-      const j = (i + 1) % n, x0 = hull[i * 2], y0 = hull[i * 2 + 1], x1 = hull[j * 2], y1 = hull[j * 2 + 1];
-      if ((x0 - x) * (x1 - x) > 0 || x0 === x1) continue;
-      const y = y0 + ((x - x0) / (x1 - x0)) * (y1 - y0);
-      if (wall && front * y <= front * wall.y) continue;
-      const ex = x1 - x0, ey = y1 - y0, l = Math.hypot(ex, ey);
-      let nx = ey / l, ny = -ex / l;
-      if (front * ny < 0) { nx = -nx; ny = -ny; }
-      wall = { x, y, nx, ny };
-    }
-    if (!wall) continue;
-    const cx = wall.x - wall.nx * (R - h), cy = wall.y - wall.ny * (R - h), r = Math.sqrt(rr);
+    const r = Math.sqrt(rr);
     for (let k = 0; k < 64; k++) {
-      const ang = (2 * Math.PI * k) / 64, px = cx + r * Math.cos(ang), py = cy + r * Math.sin(ang);
-      if ((px - wall.x) * wall.nx + (py - wall.y) * wall.ny > 0) pts.push(px, py);
+      const ang = (2 * Math.PI * k) / 64, px = sph.cx + r * Math.cos(ang), py = sph.cy + r * Math.sin(ang);
+      if ((px - sph.wall.x) * sph.wall.nx + (py - sph.wall.y) * sph.wall.ny > 0) pts.push(px, py);
     }
   }
   return convexHull(pts);
+}
+
+/**
+ * The sphere a cap is cut from, in section coordinates: on the front wall at x (the most forward hull edge crossing x)
+ * facing the way the wall faces there, its centre R − h behind the wall.
+ */
+export function capSphere(hull: Float32Array, front: 1 | -1, x: number, aM: number, h: number) {
+  if (h <= 0) return null;
+  const n = hull.length / 2, R = (aM * aM + h * h) / (2 * h);
+  let wall: { x: number; y: number; nx: number; ny: number } | null = null;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, x0 = hull[i * 2], y0 = hull[i * 2 + 1], x1 = hull[j * 2], y1 = hull[j * 2 + 1];
+    if ((x0 - x) * (x1 - x) > 0 || x0 === x1) continue;
+    const y = y0 + ((x - x0) / (x1 - x0)) * (y1 - y0);
+    if (wall && front * y <= front * wall.y) continue;
+    const ex = x1 - x0, ey = y1 - y0, l = Math.hypot(ex, ey);
+    let nx = ey / l, ny = -ex / l;
+    if (front * ny < 0) { nx = -nx; ny = -ny; }
+    wall = { x, y, nx, ny };
+  }
+  return wall && { wall, R, cx: wall.x - wall.nx * (R - h), cy: wall.y - wall.ny * (R - h) };
 }

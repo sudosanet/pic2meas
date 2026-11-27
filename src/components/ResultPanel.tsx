@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { LEVELS, LEVEL_LABEL, type Level } from "@/lib/measure";
-import { computeResults, forMode, type Results, type Source } from "@/lib/results";
+import { computeResults, forMode, grownCap, type Results, type Source } from "@/lib/results";
 import { useStore } from "@/store";
 import { editorStage } from "@/lib/editorStage";
 
@@ -62,7 +62,7 @@ export function ResultPanel() {
               override={overrides.girth[lv]} onOverride={(v) => setOverride(lv, v)} />
           ))}
           {landmarks.breast && (() => {
-            const k = heightCm / analysis.rest.statureM, h = landmarks.breast.h * k;   // cm per body-model metre
+            const k = heightCm / analysis.rest.statureM, g = grownCap(landmarks.breast, r.capScale), h = g.h * k;   // as drawn, in cm
             return (
               <div className="grid grid-cols-[1fr_auto_5.5rem] items-center gap-2 text-sm">
                 <span>胸の出っぱり <Badge variant="outline" className="ml-1 align-middle">{same(landmarks.breast, auto.breast) ? CAP_SOURCE[landmarks.breast.src] : "修正"}</Badge>
@@ -71,7 +71,7 @@ export function ResultPanel() {
                 <Input aria-label="胸の出っぱりを入力" type="number" step={0.1} min={0} className="h-7 text-right" value={f1(h)}
                   onChange={(e) => {
                     const v = Number(e.target.value);
-                    if (Number.isFinite(v) && v >= 0) setLandmarks((l) => ({ ...l, breast: { ...l.breast!, h: v / k } }));
+                    if (Number.isFinite(v) && v >= 0) setLandmarks((l) => ({ ...l, breast: { ...l.breast!, h: v / k, aM: g.aM, a: l.breast!.a * (g.aM / (l.breast!.aM || 1)) } }));
                   }} />
               </div>
             );

@@ -316,3 +316,4 @@ export function sectionWidth(hull: Float32Array): number {
   for (let i = 0; i < hull.length; i += 2) { lo = Math.min(lo, hull[i]); hi = Math.max(hi, hull[i]); }
   return hi - lo;
 }
+

@@ -30,7 +30,8 @@ function fakeAnalysis(rot: number): { a: Analysis; P: (p: Pt) => Pt } {
   set(13, { x: 190, y: 360 }); set(14, { x: 210, y: 360 });
   set(67, { x: 180, y: 105 }); set(68, { x: 220, y: 105 }); set(5, { x: 182, y: 110 }); set(6, { x: 218, y: 110 });
   set(7, { x: 175, y: 160 }); set(8, { x: 225, y: 160 }); set(62, { x: 172, y: 205 }); set(41, { x: 228, y: 205 });
-  const up = new Float32Array(70);
+  const up = new Float32Array(70), rj = new Float32Array(210);
+  rj.set([0.1, 0, 0], 9 * 3); rj.set([-0.1, 0, 0], 10 * 3); rj.set([0, 0.5, 0], 69 * 3); rj.set([0, 0.6, 0.1], 0);
   up[69] = 0.5; up[9] = up[10] = 0; up[11] = up[12] = -0.4; up[13] = up[14] = -0.8;
   const hull = convexHull(Array.from({ length: 32 }, (_, k) => [0.15 * Math.cos(k / 5), 0.1 * Math.sin(k / 5)]).flat());
   // Each section's image line: across the spine at its height (mid-hip y 200, neck y 100), 60 px wide.
@@ -50,7 +51,8 @@ function fakeAnalysis(rot: number): { a: Analysis; P: (p: Pt) => Pt } {
       person: new Uint8Array(160000).fill(1), garment: new Uint8Array(160000), garmentKind: "skirt", cut: false, joints2d: j2,
       found, art: { joints2d: j2, found },
       meshPoints: new Float32Array(), meshMask: new Uint8Array(),
-      rest: { statureM: 1.6, floorM: -0.9, torsoM: 0.5, front: 1, jointUp: up, joints: new Float32Array(210), crotchF: 0.2, girthM: { neck: 0.33, thigh: 0.55, calf: 0.35 } },
+      mesh: { faces: new Int32Array() },
+      rest: { statureM: 1.6, floorM: -0.9, torsoM: 0.5, front: 1, jointUp: up, joints: rj, verts: new Float32Array([0.07, 0.35, 0.1, -0.07, 0.35, 0.1]), crotchF: 0.2, girthM: { neck: 0.33, thigh: 0.55, calf: 0.35 } },
       sections, autoLevels: { bust: 40, underbust: 35, waist: 30, hip: 10 }, meshAnchor: { neck: P({ x: 200, y: 100 }), hip: P({ x: 200, y: 200 }) },
     },
   };

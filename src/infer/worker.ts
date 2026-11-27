@@ -339,7 +339,7 @@ function restGeometry(m: Models, { neutral, raised }: Awaited<ReturnType<typeof 
   return {
     sections,
     rest: {
-      statureM: hi - lo, floorM: lo, torsoM: frame.torso, front: frame.front, jointUp, joints: neutral.joints,
+      statureM: hi - lo, floorM: lo, torsoM: frame.torso, front: frame.front, jointUp, joints: neutral.joints, verts: neutral.verts,
       crotchF: (hipUp - crotch) / (hipUp - kneeUp), girthM: { neck, thigh, calf },
     },
     autoLevels: autoLevels(sections, frame.torso, frame.front, ...capLevels(sections, caps)),
@@ -453,7 +453,7 @@ const api: InferApi = {
       for (let i = 0, k = 0; i < proj.length / 2; i += 6) meshPoints.set([proj[i * 2], proj[i * 2 + 1]], (k++) * 2);
       last = { params: shapeFrom.params, shape: shapeFrom.shape, proj, caps: breast.caps };
       const j = body.joints2d, pt = (i: number) => ({ x: j[i * 2], y: j[i * 2 + 1] });
-      return { meshPoints, meshMask: meshSilhouette(body.verts, m.faces, body.project, w, h), meshAnchor: { neck: pt(J.neck), hip: mid2(pt(J.lHip), pt(J.rHip)) }, ...restGeometry(m, rest, proj, breast.caps) };
+      return { meshPoints, meshMask: meshSilhouette(body.verts, m.faces, body.project, w, h), mesh: { faces: m.faces.slice() }, meshAnchor: { neck: pt(J.neck), hip: mid2(pt(J.lHip), pt(J.rHip)) }, ...restGeometry(m, rest, proj, breast.caps) };
     });
 
     const result: Analysis = {
@@ -461,7 +461,7 @@ const api: InferApi = {
       transparent: img.alpha != null, person, garment, garmentKind: hasGarment ? g.kind : "none",
       cut: box.touchTop || box.touchBottom, joints2d: body.joints2d, found, art: { joints2d: joints2dArt, found: foundArt }, ...geo,
     };
-    return Comlink.transfer(result, [person.buffer, garment.buffer, body.joints2d.buffer, joints2dArt.buffer, geo.meshPoints.buffer, geo.meshMask.buffer, breast.d.buffer, ...geo.sections.map((s) => s.hull.buffer)]);
+    return Comlink.transfer(result, [person.buffer, garment.buffer, body.joints2d.buffer, joints2dArt.buffer, geo.meshPoints.buffer, geo.meshMask.buffer, breast.d.buffer, geo.mesh.faces.buffer, ...geo.sections.map((s) => s.hull.buffer)]);
   },
 };
 

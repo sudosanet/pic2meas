@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Group, Image as KImage, Layer, Line, Stage, Text } from "react-konva";
 import { editorStage } from "@/lib/editorStage";
 import { LEVELS, LEVEL_LABEL, mid2, type Level, type Pt } from "@/lib/measure";
-import { computeResults, followCaps, followWaist, forMode, waistLinked, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
+import { computeResults, followCaps, grownCap, followWaist, forMode, waistLinked, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
 import { useStore } from "@/store";
 
 const COLORS = { breast: "#db2777", head: "#64748b", crotch: "#7c3aed", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308", bone: "rgba(234,179,8,0.6)" };
@@ -82,7 +82,7 @@ export function Editor() {
           </Layer>
           {analysis && landmarks && (() => {
             const am = forMode(analysis, mode), lm = landmarks, sp = spine(am, lm);
-            const circles = auto && computeResults(am, lm, auto, { heightCm, mode, calibrate2D }, overrides).breastCircles;
+            const res = auto && computeResults(am, lm, auto, { heightCm, mode, calibrate2D }, overrides), circles = res && res.breastCircles, capScale = res ? res.capScale : 1;
             const pt = (key: "headTop" | "chin" | "crotch", label: string, color: string) => (
               <Handle p={lm[key]} u={u} color={color} label={label} onChange={(p) => set((l) => ({ ...l, [key]: p }))} />
             );
@@ -111,8 +111,9 @@ export function Editor() {
                     onMove={(c) => set((l) => followCaps(am, { ...l, breast: { ...l.breast!, [k]: c } }))}
                     onRadius={(r) => set((l) => {
                       // Scale the breast with the circle (same shape): from the radius as drawn, not the fitted one.
-                      const b = l.breast!, mPerPx = b.aM / b.a, f = r / circles.a;
-                      return followCaps(am, { ...l, breast: { ...b, a: r, aM: r * mPerPx, h: b.h * f } });
+                      // From the caps as drawn (grown to the bust), resized with the circle.
+                      const b = l.breast!, g = grownCap(b, capScale), f = r / circles.a;
+                      return followCaps(am, { ...l, breast: { ...b, a: r, aM: g.aM * f, h: g.h * f } });
                     })} />
                 ))}
                 {pt("headTop", "頭頂", COLORS.head)}

@@ -1,5 +1,5 @@
 import { Cpu, Zap } from "lucide-react";
-import { lazy, Suspense, useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ImageDrop } from "@/components/ImageDrop";
 import { InputPanel } from "@/components/InputPanel";
@@ -7,6 +7,7 @@ import { ResultPanel } from "@/components/ResultPanel";
 import { TermsDialog } from "@/components/TermsDialog";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Toaster } from "@/components/ui/sonner";
 import { analyseImage, initInference, refitBody } from "@/infer/client";
 import { ratios2d } from "@/lib/fit";
@@ -18,6 +19,7 @@ import { useStore } from "@/store";
 
 // Konva loads only once an image is in.
 const Editor = lazy(() => import("@/components/Editor").then((m) => ({ default: m.Editor })));
+const Body3D = lazy(() => import("@/components/Body3D").then((m) => ({ default: m.Body3D })));
 
 const pct = (p: P | null) => (p?.total ? Math.round(((p.loaded ?? 0) / p.total) * 100) : null);
 
@@ -67,6 +69,7 @@ export default function App() {
     finally { set({ busy: false, progress: null }); }
   };
 
+  const [view, setView] = useState<"image" | "3d">("image");
   return (
     <>
       <div className="flex h-dvh flex-col bg-background text-foreground">
@@ -80,7 +83,13 @@ export default function App() {
         </header>
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <section className="relative min-h-[60vh] flex-1 bg-muted/40 md:min-h-0">
-            {bitmap ? <Suspense><Editor /></Suspense> : <ImageDrop large onFile={onFile} />}
+            {bitmap ? <Suspense>{view === "3d" && analysis ? <Body3D /> : <Editor />}</Suspense> : <ImageDrop large onFile={onFile} />}
+            {analysis && (
+              <ToggleGroup type="single" variant="outline" size="sm" value={view} onValueChange={(v) => v && setView(v as "image" | "3d")} className="absolute top-2 right-2 bg-background">
+                <ToggleGroupItem value="image">画像</ToggleGroupItem>
+                <ToggleGroupItem value="3d">3D</ToggleGroupItem>
+              </ToggleGroup>
+            )}
             {busy && progress && (
               <div className="absolute inset-x-0 top-0 space-y-1 bg-background/90 px-4 py-2 text-sm backdrop-blur">
                 <div className="flex justify-between"><span>{label(progress)}</span><span className="tabular-nums">{pct(progress) != null && `${pct(progress)}%`}</span></div>

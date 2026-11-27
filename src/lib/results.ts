@@ -1,10 +1,10 @@
 // Landmarks (automatic or hand-corrected) → measurements. Everything is measured along the skeleton, and photos
 // use the unposed standing body, so leaning, bent or sitting poses measure like upright ones.
 import type { Analysis } from "@/infer/types";
-import { capLine, capVolume, MIN_CAP_M, withCaps, type Caps } from "./breast";
+import { capLine, capSphere, capVolume, MIN_CAP_M, withCaps, type Caps } from "./breast";
 import { jisBraSize, type BraSize } from "./cup";
 import { FLAGS } from "./flags";
-import { arcTo, J, lengthCategory, lerp2, LEVEL_LABEL, LEVEL_PRIOR, LEVELS, mid2, onPolyline, perimeter, sectionWidth, type Level, type Pt } from "./measure";
+import { arcTo, bodyFrame, J, lengthCategory, lerp2, LEVEL_LABEL, LEVEL_PRIOR, LEVELS, mid2, onPolyline, perimeter, sectionWidth, type Level, type Pt, type Vec3 } from "./measure";
 
 export type Mode = "photo" | "illust";
 export type Side = { l: Pt; r: Pt };
@@ -41,18 +41,36 @@ export function spine(a: Analysis, lm: Pick<Landmarks, "hip">) {
  * onto the current spine (a similarity mapping the mesh's neck and mid-hip onto the landmarks'), so it follows the
  * drawing's keypoints and the user's hip handles.
  */
-export function levelAt(a: Analysis, lm: Pick<Landmarks, "hip">, t: number) {
+/**
+ * The posed mesh's projection carried onto the current spine: a similarity mapping the mesh's neck and mid-hip onto
+ * the landmarks' (identity for photos left as found; illustrations follow the drawing's keypoints and the user's hip
+ * handles). toMesh is its inverse; scale is image px per projected-mesh px.
+ */
+export function meshMap(a: Analysis, lm: Pick<Landmarks, "hip">) {
   const sp = spine(a, lm), { neck: n0, hip: h0 } = a.meshAnchor;
   // z' = A z + B on complex numbers.
   const d0 = { x: n0.x - h0.x, y: n0.y - h0.y }, d1 = { x: sp.neck.x - sp.hip.x, y: sp.neck.y - sp.hip.y }, q = d0.x ** 2 + d0.y ** 2 || 1;
-  const A = { x: (d1.x * d0.x + d1.y * d0.y) / q, y: (d1.y * d0.x - d1.x * d0.y) / q }, scale = Math.hypot(A.x, A.y);
+  const A = { x: (d1.x * d0.x + d1.y * d0.y) / q, y: (d1.y * d0.x - d1.x * d0.y) / q }, scale = Math.hypot(A.x, A.y) || 1;
   const rot = (p: Pt) => ({ x: A.x * p.x - A.y * p.y, y: A.y * p.x + A.x * p.y });
-  const map = (p: Pt) => { const r = rot({ x: p.x - h0.x, y: p.y - h0.y }); return { x: r.x + sp.hip.x, y: r.y + sp.hip.y }; };
+  const unrot = (p: Pt) => ({ x: (A.x * p.x + A.y * p.y) / scale ** 2, y: (A.x * p.y - A.y * p.x) / scale ** 2 });
+  return {
+    scale, rot,
+    toImage: (p: Pt) => { const r = rot({ x: p.x - h0.x, y: p.y - h0.y }); return { x: r.x + sp.hip.x, y: r.y + sp.hip.y }; },
+    toMesh: (p: Pt) => { const r = unrot({ x: p.x - sp.hip.x, y: p.y - sp.hip.y }); return { x: r.x + h0.x, y: r.y + h0.y }; },
+  };
+}
+
+/**
+ * Where rest height t lies in the image: the nearest section's projected line, carried by meshMap so it follows the
+ * drawing's keypoints and the user's hip handles.
+ */
+export function levelAt(a: Analysis, lm: Pick<Landmarks, "hip">, t: number) {
+  const mm = meshMap(a, lm);
   let best: Analysis["sections"][number] | null = null;
   for (const s of a.sections) if (s.line2d && (!best || Math.abs(s.t - t) < Math.abs(best.t - t))) best = s;
   if (!best?.line2d) return null;
-  const L = best.line2d, r = rot(L.dir);
-  return { t: best.t, c: map(L.c), dir: { x: r.x / scale, y: r.y / scale }, a: L.a * scale, b: L.b * scale };
+  const L = best.line2d, r = mm.rot(L.dir);
+  return { t: best.t, c: mm.toImage(L.c), dir: { x: r.x / mm.scale, y: r.y / mm.scale }, a: L.a * mm.scale, b: L.b * mm.scale };
 }
 
 /** The section whose image line passes nearest to p (for dragging a level along the body). */
@@ -68,11 +86,12 @@ export function levelNear(a: Analysis, lm: Pick<Landmarks, "hip">, p: Pt) {
 }
 
 /**
- * The caps on a rest section: across position from where each centre falls along the level's image line (mapped
- * onto the hull's x range), and its distance from the line (px → m by the caps' own scale).
+ * The caps on the unposed body: each circle's centre, taken along and across the bust's image line, gives its place
+ * across the section (the line's ends map to the section's x range) and its height offset from the section plane at
+ * t. The measurement, the circles and the 3D view all use these.
  */
-function capsOnSection(a: Analysis, lm: Pick<Landmarks, "hip">, hull: Float32Array, t: number, caps: Caps) {
-  const place = levelAt(a, lm, t);
+export function capsIn3d(a: Analysis, lm: Pick<Landmarks, "hip">, caps: Caps, t: number) {
+  const place = levelAt(a, lm, t), hull = nearestSection(a, t).hull;
   if (!place || caps.a <= 0) return [];
   let lo = Infinity, hi = -Infinity;
   for (let i = 0; i < hull.length; i += 2) { lo = Math.min(lo, hull[i]); hi = Math.max(hi, hull[i]); }
@@ -80,33 +99,37 @@ function capsOnSection(a: Analysis, lm: Pick<Landmarks, "hip">, hull: Float32Arr
   return [caps.l, caps.r].map((c) => {
     const dx = c.x - place.c.x, dy = c.y - place.c.y, u = dx * place.dir.x + dy * place.dir.y;
     const f = (u - place.a) / (place.b - place.a || 1);
-    return { x: lo + f * (hi - lo), dz: (dx * -place.dir.y + dy * place.dir.x) * mPerPx, aM: caps.aM, h: caps.h };
+    return { x: lo + f * (hi - lo), dz: -(dx * -place.dir.y + dy * place.dir.x) * mPerPx, aM: caps.aM, h: caps.h };
   });
 }
 
 /**
- * Illustrations' cup (0 = AA, 1 = A, …) from the caps' projection (cm) and the hip girth (cm): least squares over
- * 118 Blue Archive characters' cups (as estimated from their art by a profile site; the game publishes none).
- * Leave-one-out: mean error 2.1 cups (constant guess 3.0), exact 15 / ±1 46 of 118. Drawings with fuller figures
- * get rounder bodies from the body model, so the hip carries much of it.
+ * The bust, the same for photos and drawings: a blend of two estimates of bust − underbust, weighed on published
+ * sizes (eval/; mean cup error, Blue Archive 118 / photos 55: shape alone 2.67 / 1.98, cup model alone 2.14 / 2.25,
+ * blend 2.19 / 2.04; the 0.3 weight minimises both).
+ * - shape: the chest wall + caps as measured, against the corrected underbust;
+ * - cup model: from the caps' projection (cm) and the hip girth (cm, uncorrected), fitted to the drawings' cups (as a
+ *   profile site estimated them from the art: the game publishes none). Fuller figures get rounder bodies from the
+ *   body model, so the hip carries much of it.
+ * underbust: the body model's runs large (photos: cup bias −3.4 → 0 at 0.89).
  */
-export const ILLUST_CUP = { c0: -28.10, h: 0.258, hip: 0.326 };
+export const BUST = { shapeWeight: 0.3, underbust: 0.89, cup: { c0: -28.10, h: 0.258, hip: 0.326 } };
 
 /**
- * Corrections for the body model's girths, least squares against published sizes. Waist and hip: 13 full-body photos
- * (0.787, 0.857; leave-one-out error 15 → 4 cm) and 40 anime characters (0.771, 0.838) agree, so both modes use them.
- * Underbust, photos only: 0.89 makes the cups of 55 photos unbiased (mean error 3.9 → 1.9 cups); illustrations' cups
- * are calibrated on the uncorrected underbust (ILLUST_CUP).
+ * Corrections shared by both modes, least squares against published sizes: waist and hip from 13 full-body photos
+ * (0.787, 0.857; leave-one-out 15 → 4 cm) agree with 40 anime characters (0.771, 0.838).
  */
-export const GIRTH_SCALE = { waist: 0.79, hip: 0.85, underbustPhoto: 0.89 };
+export const GIRTH_SCALE = { waist: 0.79, hip: 0.85 };
 
-const CUP_ORDER = ["AA", "A", "B", "C", "D", "E", "F", "G", "H", "I"];
+
 /**
- * A breast circle's radius for a cup index (AA = 0) as a fraction of the two centres' spacing: from ~0.3 (small,
- * well apart) to ~0.55 at J (touching). Relative to the drawing rather than in cm, because drawings slim the torso
- * and real-size breasts would look oversized on it. Only for drawing the circles.
+ * A cap grown by f: the projection first (h × f), the base only once the projection passes a hemisphere's (h ≤ base
+ * radius), so a bigger bust stands out rather than spreading into a wide disc.
  */
-export const cupRadiusOfSpacing = (cup: number) => 0.3 + 0.022 * Math.max(-1, cup);
+export function grownCap<T extends { aM: number; h: number }>(c: T, f: number): T {
+  const h = Math.max(c.h, 0.002) * f;
+  return { ...c, h, aM: Math.max(c.aM * Math.min(f, 1), h) };
+}
 
 /** Girth growth of the rib cage from the underbust to the bust line, without breasts (calibrated in eval/). */
 export const RIB_GROWTH = 0.06;
@@ -189,6 +212,8 @@ export type Results = {
   bra: BraSize | null;
   /** The breast circles as drawn: centres from the caps, radius from the cup (or the user's circle once edited). */
   breastCircles: { l: Pt; r: Pt; a: number } | null;
+  /** Factor on the caps' size (base and projection) at which their shape gives the reported bust. */
+  capScale: number;
   headRatio: number;
   details: { title: string; items: Detail[] }[];
   warnings: string[];
@@ -249,8 +274,6 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
 
   // Caps the image couldn't support are a placeholder: no cup from them until the user shapes them.
   const breastEdited = !!lm.breast && !same(lm.breast, auto.breast);
-  const guessedBreast = st.mode === "photo" && FLAGS.breast && !!lm.breast && lm.breast.src === "prior" && !breastEdited && ov.girth.bust == null;
-  if (guessedBreast) warnings.push("胸の形を画像から推定できませんでした。円と「胸の出っぱり」を合わせるとカップを計算します。");
   const girth = Object.fromEntries(LEVELS.map((lv) => {
     if (ov.girth[lv] != null) return [lv, { cm: ov.girth[lv]!, source: "manual" }];
     const line = lm.levels[lv];
@@ -263,24 +286,34 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     let hull = s.hull;
     if (lv === "bust" && FLAGS.breast && lm.breast) {
       const ub = nearestSection(a, lm.levels.underbust.t).hull.map((v) => v * (1 + RIB_GROWTH));
-      hull = withCaps(ub, a.rest.front, capsOnSection(a, lm, ub, line.t, lm.breast));
+      hull = withCaps(ub, a.rest.front, capsIn3d(a, lm, lm.breast, line.t));
     }
     const edited = !same(line, auto.levels[lv]) || (lv === "bust" && !same(lm.breast, auto.breast));
     return [lv, { cm: perimeter(hull, sx) * k, source: edited ? "edited" : "auto" }];
   })) as Results["girth"];
 
-  // Illustrations: the bust follows the drawing's cup, from the caps' projection and the hip girth (see ILLUST_CUP).
-  if (st.mode === "illust" && FLAGS.breast && lm.breast && ov.girth.bust == null) {
+  // Bust (BUST): blend the measured shape with the cup model; then size the caps so their shape gives that bust, which
+  // is what the circles and the 3D view show.
+  const hipRaw = girth.hip.cm;
+  if (girth.underbust.source !== "manual") girth.underbust = { ...girth.underbust, cm: girth.underbust.cm * BUST.underbust };
+  for (const lv of ["waist", "hip"] as const) if (girth[lv].source !== "manual") girth[lv] = { ...girth[lv], cm: girth[lv].cm * GIRTH_SCALE[lv] };
+  let capScale = 1;
+  if (FLAGS.breast && lm.breast && ov.girth.bust == null) {
     const hCm = lm.breast.src === "prior" && !breastEdited ? 0 : lm.breast.h * k;
-    const cup = ILLUST_CUP.c0 + ILLUST_CUP.h * hCm + ILLUST_CUP.hip * girth.hip.cm;
-    girth.bust = { cm: girth.underbust.cm + Math.max(0, 7.5 + 2.5 * cup), source: girth.bust.source };
-  }
-
-  // The body model's sections run large at the waist and hips, and (in photos) under the bust: scale factors fitted to
-  // published sizes (see GIRTH_SCALE). Hand-entered values are left alone.
-  for (const lv of ["waist", "hip", "underbust"] as const) {
-    const f = lv === "underbust" ? (st.mode === "photo" ? GIRTH_SCALE.underbustPhoto : 1) : GIRTH_SCALE[lv];
-    if (girth[lv].source !== "manual") girth[lv] = { ...girth[lv], cm: girth[lv].cm * f };
+    const model = 7.5 + 2.5 * (BUST.cup.c0 + BUST.cup.h * hCm + BUST.cup.hip * hipRaw);
+    // Caps shaped by hand are taken as they are: the shape alone.
+    const w = breastEdited ? 1 : BUST.shapeWeight;
+    const delta = Math.max(0, w * (girth.bust.cm - girth.underbust.cm) + (1 - w) * model);
+    girth.bust = { cm: girth.underbust.cm + delta, source: girth.bust.source };
+    // Caps scale f whose shape gives that bust (0 if even no caps measure more).
+    const wall = nearestSection(a, lm.levels.underbust.t).hull.map((v) => v * (1 + RIB_GROWTH));
+    const placed = capsIn3d(a, lm, lm.breast, lm.levels.bust.t);
+    const shapeAt = (f: number) => perimeter(withCaps(wall, a.rest.front, placed.map((c) => grownCap(c, f)))) * k;
+    const want = girth.bust.cm;
+    let lo = 0, hi = 4;
+    if (shapeAt(lo) >= want) hi = 0;
+    else for (let it = 0; it < 30; it++) { const mid = (lo + hi) / 2; if (shapeAt(mid) < want) lo = mid; else hi = mid; }
+    capScale = breastEdited ? 1 : hi;
   }
 
   const skirtEdited = !same([lm.waist, lm.hem, lm.hip, lm.knee, lm.ankle], [auto.waist, auto.hem, auto.hip, auto.knee, auto.ankle]);
@@ -308,9 +341,9 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     ] },
     { title: "周囲長を測った高さ（床から）", items: LEVELS.map((lv) => cm(LEVEL_LABEL[lv], ht.hip + (lm.levels[lv].t / a.rest.torsoM) * (ht.neck - ht.hip))) },
     ...(lm.breast ? [{ title: "胸（球冠モデル）", items: [
-      cm("胸の出っぱり", lm.breast.h * k),
-      cm("胸の底面の直径", 2 * lm.breast.aM * k),
-      { label: "胸の体積（片側）", value: capVolume((lm.breast.aM * k) / 100, (lm.breast.h * k) / 100) * 1e6, unit: "cc" as const },
+      cm("胸の出っぱり", grownCap(lm.breast, capScale).h * k),
+      cm("胸の底面の直径", 2 * grownCap(lm.breast, capScale).aM * k),
+      { label: "胸の体積（片側）", value: capVolume((grownCap(lm.breast, capScale).aM * k) / 100, (grownCap(lm.breast, capScale).h * k) / 100) * 1e6, unit: "cc" as const },
     ] }] : []),
     { title: "腕と肩", items: [cm("肩幅", arm.shoulders), cm("腕の長さ", arm.upper + arm.fore), cm("上腕", arm.upper), cm("前腕", arm.fore)] },
     { title: "その他の周囲長（推定）", items: [cm("首", a.rest.girthM.neck * k), cm("太もも", a.rest.girthM.thigh * k), cm("ふくらはぎ", a.rest.girthM.calf * k)] },
@@ -320,14 +353,43 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     ] },
   ];
 
-  const bra = girth.bust.cm > 0 && girth.underbust.cm > 0 && !guessedBreast ? jisBraSize(girth.bust.cm, girth.underbust.cm) : null;
-  // Untouched circles show the cup's typical breast base (so a big circle means a big cup); edited ones the user's.
-  const cupIndex = bra ? (bra.cup === "AA未満" ? -1 : bra.cup === "I超" ? 10 : CUP_ORDER.indexOf(bra.cup)) : null;
-  const breastCircles = lm.breast && (breastEdited || cupIndex == null
-    ? { l: lm.breast.l, r: lm.breast.r, a: lm.breast.a }
-    : { l: lm.breast.l, r: lm.breast.r, a: cupRadiusOfSpacing(cupIndex) * Math.hypot(lm.breast.r.x - lm.breast.l.x, lm.breast.r.y - lm.breast.l.y) });
+  const bra = girth.bust.cm > 0 && girth.underbust.cm > 0 ? jisBraSize(girth.bust.cm, girth.underbust.cm) : null;
+  // The circles: the caps' bases at the size that gives the bust (see capScale).
+  const breastCircles = lm.breast && { l: lm.breast.l, r: lm.breast.r, a: lm.breast.a * (grownCap(lm.breast, capScale).aM / (lm.breast.aM || 1)) };
   return {
-    skirt, girth, details, bra, breastCircles,
+    skirt, girth, details, bra, breastCircles, capScale,
     headRatio: H / headCm, warnings,
   };
+}
+
+/**
+ * What the 3D view shows, from the same functions as the measurement: the unposed body, the girth sections (the bust
+ * with its caps) and the caps' spheres, at the bust's cap scale. Coordinates: x across, y up (above mid-hip),
+ * z forward, in metres.
+ */
+export function view3d(a: Analysis, lm: Landmarks, capScale: number) {
+  const f = bodyFrame(a.rest.joints), v = a.rest.verts;
+  const fwd: Vec3 = [f.up[1] * f.side[2] - f.up[2] * f.side[1], f.up[2] * f.side[0] - f.up[0] * f.side[2], f.up[0] * f.side[1] - f.up[1] * f.side[0]];
+  const along = (d: Vec3, u: Vec3) => d[0] * u[0] + d[1] * u[1] + d[2] * u[2];
+  const verts = new Float32Array(v.length);
+  for (let i = 0; i < v.length; i += 3) {
+    const d: Vec3 = [v[i] - f.origin[0], v[i + 1] - f.origin[1], v[i + 2] - f.origin[2]];
+    verts.set([along(d, f.side), along(d, f.up), f.front * along(d, fwd)], i);
+  }
+  // Section points (x across, y = forward along up × side) at height t → view coordinates.
+  const ring = (hull: Float32Array, t: number) => Array.from({ length: hull.length / 2 + 1 }, (_, k) => {
+    const i = (k % (hull.length / 2)) * 2;
+    return [hull[i], t, f.front * hull[i + 1]] as Vec3;
+  });
+  const caps = lm.breast && FLAGS.breast ? capsIn3d(a, lm, lm.breast, lm.levels.bust.t).map((c) => grownCap(c, capScale)) : [];
+  const wall = nearestSection(a, lm.levels.underbust.t).hull.map((x) => x * (1 + RIB_GROWTH));
+  const rings = LEVELS.map((lv) => {
+    const t = lm.levels[lv].t, hull = lv === "bust" && caps.length ? withCaps(wall, a.rest.front, caps) : nearestSection(a, t).hull;
+    return { level: lv, points: ring(hull, t) };
+  });
+  const spheres = caps.flatMap((c) => {
+    const t = lm.levels.bust.t + c.dz, s = capSphere(nearestSection(a, t).hull, a.rest.front, c.x, c.aM, c.h);
+    return s ? [{ center: [s.cx, t, f.front * s.cy] as Vec3, radius: s.R, normal: [s.wall.nx, 0, f.front * s.wall.ny] as Vec3, h: c.h }] : [];
+  });
+  return { verts, faces: a.mesh.faces, rings, spheres };
 }

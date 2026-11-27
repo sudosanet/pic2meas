@@ -36,6 +36,7 @@ export type Analysis = {
     joints: Float32Array; // 70 × 3
     crotchF: number; // crotch between hip (0) and knee (1)
     girthM: { neck: number; thigh: number; calf: number };
+    verts: Float32Array; // the unposed (arms-down) mesh, 3 per vertex, same frame as joints
   };
   /** Rest-pose sections every 1 cm; t = height above mid-hip (m); line2d = where the section lies in the image. */
   sections: { t: number; hull: Float32Array; armContact: number; line2d: Line2d | null }[];
@@ -45,6 +46,8 @@ export type Analysis = {
    * chest. caps: the two spherical caps fitted to it, in image px.
    */
   breast: { d: Float32Array; x0: number; y0: number; side: number; grid: number; mPerCell: number; caps: Caps };
+  /** The body mesh's triangles (for the 3D view of rest.verts). */
+  mesh: { faces: Int32Array };
   /** The posed mesh's projected neck and mid-hip, which line2d is relative to. */
   meshAnchor: { neck: Pt; hip: Pt };
   autoLevels: Record<Level, number>;
