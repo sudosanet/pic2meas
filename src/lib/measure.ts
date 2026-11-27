@@ -38,40 +38,76 @@ export function extent(mask: Mask, w: number, h: number) {
   return { x0, x1, y0, y1, touchTop: y0 <= 1, touchBottom: y1 >= h - 2 };
 }
 
-const median = (a: number[]) => [...a].sort((x, y) => x - y)[a.length >> 1] ?? NaN;
+// ---- 2D geometry along the skeleton (pose-invariant: nothing assumes the body is upright) ----
 
-/** Waistband and hem: median top and bottom edges over the central 70% of the garment's columns. */
-export function garmentLines(mask: Mask, w: number, h: number) {
-  const e = extent(mask, w, h);
-  if (!e) return null;
-  const tops: number[] = [], bottoms: number[] = [], m = (e.x1 - e.x0) * 0.15;
-  for (let x = Math.ceil(e.x0 + m); x <= e.x1 - m; x++) {
-    let t = -1, b = -1;
-    for (let y = e.y0; y <= e.y1; y++) if (mask[y * w + x]) { if (t < 0) t = y; b = y; }
-    if (t >= 0) { tops.push(t); bottoms.push(b); }
-  }
-  return { waistY: median(tops), hemY: median(bottoms) };
-}
+export type Pt = { x: number; y: number };
+const d2 = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
+export const lerp2 = (a: Pt, b: Pt, t: number): Pt => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+export const mid2 = (a: Pt, b: Pt) => lerp2(a, b, 0.5);
 
-/** The run of mask pixels on row y nearest to column cx: the body's width there. */
-export function rowSpan(mask: Mask, w: number, h: number, y: number, cx: number) {
-  const r = Math.min(h - 1, Math.max(0, Math.round(y))) * w;
-  let best: { x0: number; x1: number } | null = null, bestD = Infinity;
-  for (let x = 0; x < w; x++) {
-    if (!mask[r + x]) continue;
-    const x0 = x;
-    while (x + 1 < w && mask[r + x + 1]) x++;
-    const d = Math.max(0, x0 - cx, cx - x);
-    if (d < bestD) { bestD = d; best = { x0, x1: x }; }
+/** Nearest position on a polyline as (segment, fraction); the first and last segments extend past their ends. */
+export function onPolyline(p: Pt, line: Pt[]): { seg: number; frac: number } {
+  let best = { seg: 0, frac: 0 }, bestD = Infinity;
+  for (let i = 0; i < line.length - 1; i++) {
+    const a = line[i], b = line[i + 1], ab = { x: b.x - a.x, y: b.y - a.y };
+    let f = ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / (ab.x ** 2 + ab.y ** 2 || 1);
+    if (i > 0) f = Math.max(0, f);
+    if (i < line.length - 2) f = Math.min(1, f);
+    const d = d2(p, lerp2(a, b, f));
+    if (d < bestD) { bestD = d; best = { seg: i, frac: f }; }
   }
   return best;
 }
 
-/** Hem position u on a hip (0) – knee (1) – ankle (2) scale, and its category. */
-export function lengthCategory(hemY: number, hipY: number, kneeY: number, ankleY: number) {
-  const u = hemY <= kneeY ? (hemY - hipY) / (kneeY - hipY) : 1 + (hemY - kneeY) / (ankleY - kneeY);
-  return { u, label: LENGTH_CATEGORIES.find(([lim]) => u < lim)![1] };
+/** Arc length of a polyline from its start to a position on it. */
+export function arcTo(line: Pt[], { seg, frac }: { seg: number; frac: number }) {
+  let s = 0;
+  for (let i = 0; i < seg; i++) s += d2(line[i], line[i + 1]);
+  return s + frac * d2(line[seg], line[seg + 1]);
 }
+
+const inMask = (mask: Mask, w: number, h: number, p: Pt) => {
+  const x = Math.round(p.x), y = Math.round(p.y);
+  return x >= 0 && y >= 0 && x < w && y < h && mask[y * w + x] === 1;
+};
+
+/** Points every 1 px along a polyline. */
+function* walk(line: Pt[]) {
+  for (let i = 0; i < line.length - 1; i++) {
+    const n = Math.max(1, Math.ceil(d2(line[i], line[i + 1])));
+    for (let k = 0; k < n; k++) yield lerp2(line[i], line[i + 1], k / n);
+  }
+  yield line[line.length - 1];
+}
+
+/** First and last points of a polyline that fall inside the mask. */
+export function insideRange(mask: Mask, w: number, h: number, line: Pt[]) {
+  let first: Pt | null = null, last: Pt | null = null;
+  for (const p of walk(line)) if (inMask(mask, w, h, p)) { first ??= p; last = p; }
+  return first && last ? { first, last } : null;
+}
+
+/** Continue from `from` in direction `dir` until leaving the mask: the mask's edge there. */
+export function edgeAlong(mask: Mask, w: number, h: number, from: Pt, dir: Pt, max = 4000): Pt {
+  const l = Math.hypot(dir.x, dir.y) || 1, u = { x: dir.x / l, y: dir.y / l };
+  let p = from;
+  for (let k = 1; k < max; k++) {
+    const q = { x: from.x + u.x * k, y: from.y + u.y * k };
+    if (!inMask(mask, w, h, q)) break;
+    p = q;
+  }
+  return p;
+}
+
+/** Width of the mask through point p across direction `dir`: signed distances (a < 0 < b) to its two edges. */
+export function spanAcross(mask: Mask, w: number, h: number, p: Pt, dir: Pt): { a: number; b: number } | null {
+  if (!inMask(mask, w, h, p)) return null;
+  const l = Math.hypot(dir.x, dir.y), u = { x: dir.x / l, y: dir.y / l };
+  return { a: -d2(p, edgeAlong(mask, w, h, p, { x: -u.x, y: -u.y })), b: d2(p, edgeAlong(mask, w, h, p, u)) };
+}
+
+/** Category from the hem position u on a hip (0) – knee (1) – ankle (2) scale. */
+export const lengthCategory = (u: number) => LENGTH_CATEGORIES.find(([lim]) => u < lim)![1];
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];

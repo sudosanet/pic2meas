@@ -25,7 +25,7 @@ export function InputPanel() {
           <span className="text-sm text-muted-foreground">cm</span>
         </div>
         <div className="flex items-center justify-between gap-2">
-          <Label htmlFor="cal2d" className="leading-snug">シルエット幅で周囲長を補正<span className="block text-xs font-normal text-muted-foreground">イラスト向け。橙の線の端をドラッグして幅を合わせる</span></Label>
+          <Label htmlFor="cal2d" className="leading-snug">シルエット幅で周囲長を補正<span className="block text-xs font-normal text-muted-foreground">体に沿った服のとき向け。橙の線の端をドラッグして幅を合わせる</span></Label>
           <Switch id="cal2d" checked={calibrate2D} onCheckedChange={(v) => set({ calibrate2D: v })} />
         </div>
         <div className="space-y-2 text-sm">

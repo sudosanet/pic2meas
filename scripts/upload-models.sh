@@ -23,12 +23,16 @@ fetch "$HF/momolesang/InstantHMR/resolve/main/mhr-body.onnx" mhr-body.onnx
 fetch https://raw.githubusercontent.com/NVlabs/SegFormer/master/LICENSE LICENSE-SegFormer.txt
 fetch https://raw.githubusercontent.com/Naturalpad-studio/InstantHMR/main/LICENSE-SAM LICENSE-InstantHMR-SAM.txt
 fetch https://raw.githubusercontent.com/facebookresearch/MHR/main/LICENSE LICENSE-MHR.txt
+fetch https://raw.githubusercontent.com/open-mmlab/mmpose/main/LICENSE LICENSE-MMPose.txt
+# RTMPose (Human-Art) is converted locally: see tools/convert_rtmpose.py.
+[ -s "$CACHE/rtmpose-m-humanart.onnx" ] || { echo "missing $CACHE/rtmpose-m-humanart.onnx: run tools/convert_rtmpose.py first" >&2; exit 1; }
 (cd "$CACHE" && shasum -a 256 *.onnx)
 
 put "$CACHE/segformer_b2_clothes.onnx" models/segformer_b2_clothes-fp32-v1.onnx
 put "$CACHE/instanthmr-medium-fit2.onnx" models/instanthmr-medium-fit2-v1.1.onnx
 put "$CACHE/mhr-body.onnx" models/mhr-body-v1.1.onnx
-for f in LICENSE-SegFormer.txt LICENSE-InstantHMR-SAM.txt LICENSE-MHR.txt; do put "$CACHE/$f" "models/$f"; done
+put "$CACHE/rtmpose-m-humanart.onnx" models/rtmpose-m-humanart-v1.onnx
+for f in LICENSE-SegFormer.txt LICENSE-InstantHMR-SAM.txt LICENSE-MHR.txt LICENSE-MMPose.txt; do put "$CACHE/$f" "models/$f"; done
 for f in ort-wasm-simd-threaded.asyncify.wasm ort-wasm-simd-threaded.asyncify.mjs; do
   put "node_modules/onnxruntime-web/dist/$f" "models/ort-$ORT/$f"
 done

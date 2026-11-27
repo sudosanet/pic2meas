@@ -2,15 +2,14 @@ import type Konva from "konva";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Group, Image as KImage, Layer, Line, Stage, Text } from "react-konva";
 import { editorStage } from "@/lib/editorStage";
-import { LEVELS, LEVEL_LABEL, type Level } from "@/lib/measure";
-import type { Landmarks, LevelLine, Side } from "@/lib/results";
+import { LEVELS, LEVEL_LABEL, mid2, spanAcross, type Level, type Pt } from "@/lib/measure";
+import { forMode, spine, type Landmarks, type LevelLine } from "@/lib/results";
 import { useStore } from "@/store";
 
-
-const COLORS = { head: "#64748b", chin: "#94a3b8", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308" };
+const COLORS = { head: "#64748b", crotch: "#7c3aed", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308", bone: "rgba(234,179,8,0.6)" };
 
 export function Editor() {
-  const { bitmap, analysis, landmarks, layers, setLandmarks } = useStore();
+  const { bitmap, analysis, landmarks, layers, mode, setLandmarks } = useStore();
   const box = useRef<HTMLDivElement>(null), stageRef = useRef<Konva.Stage>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
@@ -81,22 +80,38 @@ export function Editor() {
             <KImage image={bitmap} width={w} height={h} />
             {overlay && <KImage image={overlay} width={w} height={h} listening={false} />}
           </Layer>
-          {landmarks && (
-            <Layer>
-              <HLine y={landmarks.headY} w={w} u={u} color={COLORS.head} label="頭頂" onChange={(y) => set((l) => ({ ...l, headY: y }))} />
-              <HLine y={landmarks.chinY} w={w} u={u} color={COLORS.chin} label="あご（頭身）" onChange={(y) => set((l) => ({ ...l, chinY: y }))} />
-              <HLine y={landmarks.soleY} w={w} u={u} color={COLORS.head} label="足裏" onChange={(y) => set((l) => ({ ...l, soleY: y }))} />
-              {<HLine y={landmarks.waistY} w={w} u={u} color={COLORS.waist} label="ウエスト（丈の起点）" onChange={(y) => set((l) => ({ ...l, waistY: y }))} />}
-              {<HLine y={landmarks.hemY} w={w} u={u} color={COLORS.hem} label="裾" onChange={(y) => set((l) => ({ ...l, hemY: y }))} />}
-              {layers.levels && LEVELS.map((lv) => (
-                <WidthLine key={lv} line={landmarks.levels[lv]} u={u} label={LEVEL_LABEL[lv]}
-                  onChange={(patch) => set((l) => ({ ...l, levels: { ...l.levels, [lv]: { ...l.levels[lv], ...patch } } as Record<Level, LevelLine> }))} />
-              ))}
-              {(["hip", "knee", "ankle"] as const).map((k) => (
-                <Joints key={k} side={landmarks[k]} u={u} onChange={(lr, p) => set((l) => ({ ...l, [k]: { ...l[k], [lr]: p } }))} />
-              ))}
-            </Layer>
-          )}
+          {analysis && landmarks && (() => {
+            const lm = landmarks, sp = spine(forMode(analysis, mode), lm);
+            const pt = (key: "headTop" | "chin" | "waist" | "crotch", label: string, color: string) => (
+              <Handle p={lm[key]} u={u} color={color} label={label} onChange={(p) => set((l) => ({ ...l, [key]: p }))} />
+            );
+            const pair = (key: "hip" | "knee" | "ankle" | "hem" | "sole", label: string, color: string) => (["l", "r"] as const).map((s) => (
+              <Handle key={key + s} p={lm[key][s]} u={u} color={color} label={label} onChange={(p) => set((l) => ({ ...l, [key]: { ...l[key], [s]: p } }))} />
+            ));
+            const flat = (ps: Pt[]) => ps.flatMap((p) => [p.x, p.y]);
+            return (
+              <Layer>
+                {/* The skeleton everything is measured along. */}
+                {[[sp.neck, sp.hip], ...(["l", "r"] as const).map((s) => [mid2(lm.hip.l, lm.hip.r), lm.hip[s], lm.knee[s], lm.ankle[s], lm.sole[s]])].map((ps, i) => (
+                  <Line key={i} points={flat(ps)} stroke={COLORS.bone} strokeWidth={2 * u} dash={[6 * u, 4 * u]} listening={false} />
+                ))}
+                {layers.levels && LEVELS.map((lv) => (
+                  <Level key={lv} line={lm.levels[lv]} sp={sp} torso={analysis.rest.torsoM} u={u} label={LEVEL_LABEL[lv]}
+                    width={(t) => spanAcross(analysis.person, analysis.w, analysis.h, sp.at(t), sp.across)}
+                    onChange={(patch) => set((l) => ({ ...l, levels: { ...l.levels, [lv]: { ...l.levels[lv], ...patch } } as Record<Level, LevelLine> }))} />
+                ))}
+                {pt("headTop", "頭頂", COLORS.head)}
+                {pt("chin", "あご", COLORS.head)}
+                {mode === "illust" && pair("sole", "足裏", COLORS.head)}
+                {pair("hip", "", COLORS.joint)}
+                {pair("knee", "", COLORS.joint)}
+                {pair("ankle", "", COLORS.joint)}
+                {pt("crotch", "股下", COLORS.crotch)}
+                {pt("waist", "ウエスト", COLORS.waist)}
+                {pair("hem", "裾", COLORS.hem)}
+              </Layer>
+            );
+          })()}
         </Stage>
       )}
     </div>
@@ -105,40 +120,39 @@ export function Editor() {
 
 const cursor = (e: Konva.KonvaEventObject<MouseEvent>, c: string) => { const s = e.target.getStage(); if (s) s.container().style.cursor = c; };
 
-function HLine({ y, w, u, color, label, onChange }: { y: number; w: number; u: number; color: string; label: string; onChange: (y: number) => void }) {
+function Handle({ p, u, color, label, onChange }: { p: Pt; u: number; color: string; label: string; onChange: (p: Pt) => void }) {
   return (
-    <Group y={y} draggable onDragMove={(e) => { e.target.x(0); onChange(e.target.y()); }}
-      onMouseEnter={(e) => cursor(e, "ns-resize")} onMouseLeave={(e) => cursor(e, "")}>
-      <Line points={[0, 0, w, 0]} stroke={color} strokeWidth={2 * u} hitStrokeWidth={14 * u} />
-      <Text text={label} x={6 * u} y={-18 * u} fontSize={13 * u} fill={color} fontStyle="bold" />
+    <Group x={p.x} y={p.y} draggable onDragMove={(e) => onChange({ x: e.target.x(), y: e.target.y() })}
+      onMouseEnter={(e) => cursor(e, "move")} onMouseLeave={(e) => cursor(e, "")}>
+      <Circle radius={6 * u} fill={color} stroke="#fff" strokeWidth={1.5 * u} />
+      {label && <Text text={label} x={9 * u} y={-7 * u} fontSize={12 * u} fill={color} fontStyle="bold" />}
     </Group>
   );
 }
 
-/** Girth level: drag the line for height, its ends for the silhouette width. */
-function WidthLine({ line, u, label, onChange }: { line: LevelLine; u: number; label: string; onChange: (patch: Partial<LevelLine>) => void }) {
-  const end = (key: "x0" | "x1") => (
-    <Circle x={line[key]} y={line.y} radius={6 * u} fill="#fff" stroke={COLORS.level} strokeWidth={2 * u} draggable
+/** Girth level across the spine: the centre slides along the spine (re-measuring the width), the ends adjust it. */
+function Level({ line, sp, torso, u, label, width, onChange }: {
+  line: LevelLine; sp: ReturnType<typeof spine>; torso: number; u: number; label: string;
+  width: (t: number) => { a: number; b: number } | null; onChange: (patch: Partial<LevelLine>) => void;
+}) {
+  const c = sp.at(line.t), d = sp.across, at = (s: number) => ({ x: c.x + d.x * s, y: c.y + d.y * s });
+  const A = at(line.a), B = at(line.b);
+  const along = (q: Pt) => ((q.x - sp.hip.x) * (sp.neck.x - sp.hip.x) + (q.y - sp.hip.y) * (sp.neck.y - sp.hip.y)) / sp.len ** 2 * torso;
+  const across = (q: Pt) => (q.x - c.x) * d.x + (q.y - c.y) * d.y;
+  const end = (key: "a" | "b", p: Pt) => (
+    <Circle x={p.x} y={p.y} radius={6 * u} fill="#fff" stroke={COLORS.level} strokeWidth={2 * u} draggable
       onMouseEnter={(e) => cursor(e, "ew-resize")} onMouseLeave={(e) => cursor(e, "")}
-      onDragMove={(e) => { e.target.y(line.y); onChange({ [key]: e.target.x() }); }} />
+      onDragMove={(e) => { const s = across(e.target.position()); e.target.position(at(s)); onChange({ [key]: s }); }} />
   );
   return (
     <>
-      <Group y={line.y} draggable onDragMove={(e) => { e.target.x(0); onChange({ y: e.target.y() }); }}
-        onMouseEnter={(e) => cursor(e, "ns-resize")} onMouseLeave={(e) => cursor(e, "")}>
-        <Line points={[line.x0, 0, line.x1, 0]} stroke={COLORS.level} strokeWidth={2 * u} dash={[8 * u, 4 * u]} hitStrokeWidth={14 * u} />
-        <Text text={label} x={line.x1 + 10 * u} y={-7 * u} fontSize={12 * u} fill={COLORS.level} fontStyle="bold" />
-      </Group>
-      {end("x0")}
-      {end("x1")}
+      <Line points={[A.x, A.y, B.x, B.y]} stroke={COLORS.level} strokeWidth={2 * u} dash={[8 * u, 4 * u]} listening={false} />
+      <Text text={label} x={B.x + 10 * u} y={B.y - 7 * u} fontSize={12 * u} fill={COLORS.level} fontStyle="bold" listening={false} />
+      <Circle x={c.x} y={c.y} radius={5 * u} fill={COLORS.level} draggable
+        onMouseEnter={(e) => cursor(e, "ns-resize")} onMouseLeave={(e) => cursor(e, "")}
+        onDragMove={(e) => { const t = along(e.target.position()); e.target.position(sp.at(t)); onChange({ t, ...width(t) }); }} />
+      {end("a", A)}
+      {end("b", B)}
     </>
   );
-}
-
-function Joints({ side, u, onChange }: { side: Side; u: number; onChange: (lr: "l" | "r", p: { x: number; y: number }) => void }) {
-  return (["l", "r"] as const).map((k) => (
-    <Circle key={k} x={side[k].x} y={side[k].y} radius={6 * u} fill={COLORS.joint} stroke="#000" strokeWidth={u} draggable
-      onMouseEnter={(e) => cursor(e, "move")} onMouseLeave={(e) => cursor(e, "")}
-      onDragMove={(e) => onChange(k, { x: e.target.x(), y: e.target.y() })} />
-  ));
 }

@@ -8,7 +8,11 @@ import { TermsDialog } from "@/components/TermsDialog";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Toaster } from "@/components/ui/sonner";
-import { analyseImage, initInference } from "@/infer/client";
+import { analyseImage, initInference, refitBody } from "@/infer/client";
+import { ratios2d } from "@/lib/fit";
+import { FLAGS } from "@/lib/flags";
+import { J } from "@/lib/measure";
+import { forMode, spine } from "@/lib/results";
 import type { Progress as P } from "@/infer/types";
 import { useStore } from "@/store";
 
@@ -18,7 +22,7 @@ const Editor = lazy(() => import("@/components/Editor").then((m) => ({ default: 
 const pct = (p: P | null) => (p?.total ? Math.round(((p.loaded ?? 0) / p.total) * 100) : null);
 
 export default function App() {
-  const { bitmap, analysis, busy, progress, backend, setImage, setAnalysis, set } = useStore();
+  const { bitmap, analysis, landmarks, mode, busy, progress, backend, setImage, setAnalysis, applyRefit, set } = useStore();
   const onProgress = (p: P) => set({ progress: p });
 
   // Start loading the models right away.
@@ -29,6 +33,20 @@ export default function App() {
       .catch((e: Error) => toast.error(`モデルを読み込めませんでした: ${e.message}`))
       .finally(() => set({ busy: false, progress: null }));
   }, []);
+
+  // Illustrations: fit the 3D body's proportions to the drawing's skeleton, after analysis and after the user
+  // moves points (debounced). Girth levels are excluded from the key so a refit doesn't trigger itself.
+  const skeletonKey = landmarks && JSON.stringify([landmarks.headTop, landmarks.hip, landmarks.knee, landmarks.ankle, landmarks.sole]);
+  useEffect(() => {
+    if (mode !== "illust" || !FLAGS.fit || !analysis || !landmarks) return;
+    const a = forMode(analysis, mode), j = (i: number) => ({ x: a.joints2d[i * 2], y: a.joints2d[i * 2 + 1] });
+    const target = ratios2d({
+      ...landmarks, neck: spine(a, landmarks).neck,
+      shoulder: { l: j(J.lShoulder), r: j(J.rShoulder) }, elbow: { l: j(J.lElbow), r: j(J.rElbow) },
+    });
+    const timer = setTimeout(() => refitBody(target).then((r) => applyRefit(analysis, r)).catch((e: Error) => console.warn("refit", e)), 500);
+    return () => clearTimeout(timer);
+  }, [mode, analysis?.joints2d, skeletonKey]);
 
   useEffect(() => {
     const dark = matchMedia("(prefers-color-scheme: dark)");

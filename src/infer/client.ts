@@ -1,4 +1,5 @@
 import * as Comlink from "comlink";
+import type { Ratios } from "@/lib/fit";
 import type { Backend, InferApi, Progress } from "./types";
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -16,3 +17,4 @@ const requestedBackend = (): Backend | "auto" => {
 
 export const initInference = (onProgress: (p: Progress) => void) => serial(() => api.init(requestedBackend(), Comlink.proxy(onProgress)));
 export const analyseImage = (image: Blob, onProgress: (p: Progress) => void) => serial(() => api.analyse(image, Comlink.proxy(onProgress)));
+export const refitBody = (target: Ratios) => serial(() => api.refit(target));

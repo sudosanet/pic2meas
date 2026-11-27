@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { LEVELS, LEVEL_LABEL, type Level } from "@/lib/measure";
-import { computeResults, type Results, type Source } from "@/lib/results";
+import { computeResults, forMode, type Results, type Source } from "@/lib/results";
 import { useStore } from "@/store";
 import { editorStage } from "@/lib/editorStage";
 
@@ -29,14 +29,17 @@ function Row({ label, value, unit, source, override, onOverride }: {
 }
 
 export function ResultPanel() {
-  const { analysis, landmarks, auto, heightCm, mode, calibrate2D, overrides, setOverride, file } = useStore();
+  const { analysis, landmarks, auto, heightCm, mode, calibrate2D, overrides, setOverride, file, fitResidual } = useStore();
   if (!analysis || !landmarks || !auto) return null;
-  const r = computeResults(analysis, landmarks, auto, { heightCm, mode, calibrate2D }, overrides);
+  const r = computeResults(forMode(analysis, mode), landmarks, auto, { heightCm, mode, calibrate2D }, overrides);
 
   return (
     <Card size="sm">
       <CardHeader><CardTitle>結果</CardTitle></CardHeader>
       <CardContent className="space-y-4">
+        {mode === "illust" && fitResidual != null && (
+          <p className="text-xs text-muted-foreground">体型の比率を絵に合わせています（ずれ {(fitResidual * 100).toFixed(1)}%）</p>
+        )}
         {r.warnings.map((w) => (
           <Alert key={w} variant="destructive"><TriangleAlert /><AlertDescription>{w}</AlertDescription></Alert>
         ))}
@@ -72,6 +75,17 @@ export function ResultPanel() {
           </div>
         </section>
 
+        {r.details.map((g) => (
+          <section key={g.title} className="space-y-1">
+            <h3 className="text-xs font-medium text-muted-foreground">{g.title}</h3>
+            {g.items.map((d) => (
+              <div key={d.label} className="flex justify-between text-sm">
+                <span>{d.label}</span><span className="tabular-nums">{f1(d.value)}{d.unit && ` ${d.unit}`}</span>
+              </div>
+            ))}
+          </section>
+        ))}
+
         <div className="flex gap-2">
           <Button variant="outline" size="sm" className="flex-1" onClick={exportPng}><ImageDown />画像</Button>
           <Button variant="outline" size="sm" className="flex-1" onClick={() => exportJson(r, file?.name)}><FileJson />JSON</Button>
@@ -104,6 +118,7 @@ function summary(r: Results) {
     girthCm: Object.fromEntries(LEVELS.map((lv) => [lv, { value: +r.girth[lv].cm.toFixed(1), source: r.girth[lv].source }])),
     bra: r.bra && { label: r.bra.label, cup: r.bra.cup, band: r.bra.band, diffCm: +r.bra.diff.toFixed(1) },
     headRatio: +r.headRatio.toFixed(2),
+    details: Object.fromEntries(r.details.map((g) => [g.title, Object.fromEntries(g.items.map((d) => [d.label, `${f1(d.value)}${d.unit && ` ${d.unit}`}`]))])),
     warnings: r.warnings,
   };
 }
@@ -121,6 +136,7 @@ async function copyText(r: Results) {
     ...LEVELS.map((lv) => `${LEVEL_LABEL[lv]} ${f1(r.girth[lv].cm)} cm`),
     r.bra ? `ブラサイズ ${r.bra.label}` : null,
     `頭身 ${f1(r.headRatio)}`,
+    ...r.details.flatMap((g) => g.items.map((d) => `${d.label} ${f1(d.value)}${d.unit && ` ${d.unit}`}`)),
     "※ 画像1枚からの推定値",
   ].filter(Boolean);
   await navigator.clipboard.writeText(lines.join("\n"));
