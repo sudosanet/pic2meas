@@ -2,11 +2,11 @@ import type Konva from "konva";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Group, Image as KImage, Layer, Line, Stage, Text } from "react-konva";
 import { editorStage } from "@/lib/editorStage";
-import { LEVELS, LEVEL_LABEL, mid2, spanAcross, type Level, type Pt } from "@/lib/measure";
-import { forMode, spine, type Landmarks, type LevelLine } from "@/lib/results";
+import { LEVELS, LEVEL_LABEL, mid2, type Level, type Pt } from "@/lib/measure";
+import { forMode, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
 import { useStore } from "@/store";
 
-const COLORS = { head: "#64748b", crotch: "#7c3aed", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308", bone: "rgba(234,179,8,0.6)" };
+const COLORS = { breast: "#db2777", head: "#64748b", crotch: "#7c3aed", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308", bone: "rgba(234,179,8,0.6)" };
 
 export function Editor() {
   const { bitmap, analysis, landmarks, layers, mode, setLandmarks } = useStore();
@@ -81,7 +81,7 @@ export function Editor() {
             {overlay && <KImage image={overlay} width={w} height={h} listening={false} />}
           </Layer>
           {analysis && landmarks && (() => {
-            const lm = landmarks, sp = spine(forMode(analysis, mode), lm);
+            const am = forMode(analysis, mode), lm = landmarks, sp = spine(am, lm);
             const pt = (key: "headTop" | "chin" | "waist" | "crotch", label: string, color: string) => (
               <Handle p={lm[key]} u={u} color={color} label={label} onChange={(p) => set((l) => ({ ...l, [key]: p }))} />
             );
@@ -96,9 +96,14 @@ export function Editor() {
                   <Line key={i} points={flat(ps)} stroke={COLORS.bone} strokeWidth={2 * u} dash={[6 * u, 4 * u]} listening={false} />
                 ))}
                 {layers.levels && LEVELS.map((lv) => (
-                  <Level key={lv} line={lm.levels[lv]} sp={sp} torso={analysis.rest.torsoM} u={u} label={LEVEL_LABEL[lv]}
-                    width={(t) => spanAcross(analysis.person, analysis.w, analysis.h, sp.at(t), sp.across)}
+                  <Level key={lv} line={lm.levels[lv]} u={u} label={LEVEL_LABEL[lv]}
+                    at={(t) => levelAt(am, lm, t)} near={(p) => levelNear(am, lm, p)}
                     onChange={(patch) => set((l) => ({ ...l, levels: { ...l.levels, [lv]: { ...l.levels[lv], ...patch } } as Record<Level, LevelLine> }))} />
+                ))}
+                {layers.levels && lm.breast && (["l", "r"] as const).map((k) => (
+                  <Cap key={k} c={lm.breast![k]} a={lm.breast!.a} u={u}
+                    onMove={(c) => set((l) => ({ ...l, breast: { ...l.breast!, [k]: c } }))}
+                    onRadius={(r) => set((l) => ({ ...l, breast: { ...l.breast!, a: r, aM: (l.breast!.aM / l.breast!.a) * r } }))} />
                 ))}
                 {pt("headTop", "頭頂", COLORS.head)}
                 {pt("chin", "あご", COLORS.head)}
@@ -130,14 +135,15 @@ function Handle({ p, u, color, label, onChange }: { p: Pt; u: number; color: str
   );
 }
 
-/** Girth level across the spine: the centre slides along the spine (re-measuring the width), the ends adjust it. */
-function Level({ line, sp, torso, u, label, width, onChange }: {
-  line: LevelLine; sp: ReturnType<typeof spine>; torso: number; u: number; label: string;
-  width: (t: number) => { a: number; b: number } | null; onChange: (patch: Partial<LevelLine>) => void;
+/** Girth level: the centre slides along the body (snapping to the sections, re-measuring the width), the ends adjust it. */
+function Level({ line, u, label, at: placeAt, near, onChange }: {
+  line: LevelLine; u: number; label: string;
+  at: (t: number) => ReturnType<typeof levelAt>; near: (p: Pt) => ReturnType<typeof levelAt>; onChange: (patch: Partial<LevelLine>) => void;
 }) {
-  const c = sp.at(line.t), d = sp.across, at = (s: number) => ({ x: c.x + d.x * s, y: c.y + d.y * s });
+  const place = placeAt(line.t);
+  if (!place) return null;
+  const { c, dir: d } = place, at = (s: number) => ({ x: c.x + d.x * s, y: c.y + d.y * s });
   const A = at(line.a), B = at(line.b);
-  const along = (q: Pt) => ((q.x - sp.hip.x) * (sp.neck.x - sp.hip.x) + (q.y - sp.hip.y) * (sp.neck.y - sp.hip.y)) / sp.len ** 2 * torso;
   const across = (q: Pt) => (q.x - c.x) * d.x + (q.y - c.y) * d.y;
   const end = (key: "a" | "b", p: Pt) => (
     <Circle x={p.x} y={p.y} radius={6 * u} fill="#fff" stroke={COLORS.level} strokeWidth={2 * u} draggable
@@ -150,9 +156,24 @@ function Level({ line, sp, torso, u, label, width, onChange }: {
       <Text text={label} x={B.x + 10 * u} y={B.y - 7 * u} fontSize={12 * u} fill={COLORS.level} fontStyle="bold" listening={false} />
       <Circle x={c.x} y={c.y} radius={5 * u} fill={COLORS.level} draggable
         onMouseEnter={(e) => cursor(e, "ns-resize")} onMouseLeave={(e) => cursor(e, "")}
-        onDragMove={(e) => { const t = along(e.target.position()); e.target.position(sp.at(t)); onChange({ t, ...width(t) }); }} />
+        onDragMove={(e) => { const l = near(e.target.position()); if (!l) return; e.target.position(l.c); onChange({ t: l.t, a: l.a, b: l.b }); }} />
       {end("a", A)}
       {end("b", B)}
+    </>
+  );
+}
+
+/** One breast cap's base: drag the centre to move it, the ring's right-hand handle to resize both. */
+function Cap({ c, a, u, onMove, onRadius }: { c: Pt; a: number; u: number; onMove: (c: Pt) => void; onRadius: (r: number) => void }) {
+  return (
+    <>
+      <Circle x={c.x} y={c.y} radius={a} stroke={COLORS.breast} strokeWidth={1.5 * u} dash={[5 * u, 4 * u]} listening={false} />
+      <Circle x={c.x} y={c.y} radius={5 * u} fill={COLORS.breast} draggable
+        onMouseEnter={(e) => cursor(e, "move")} onMouseLeave={(e) => cursor(e, "")}
+        onDragMove={(e) => onMove({ x: e.target.x(), y: e.target.y() })} />
+      <Circle x={c.x + a} y={c.y} radius={5 * u} fill="#fff" stroke={COLORS.breast} strokeWidth={2 * u} draggable
+        onMouseEnter={(e) => cursor(e, "ew-resize")} onMouseLeave={(e) => cursor(e, "")}
+        onDragMove={(e) => { const r = Math.max(4, e.target.x() - c.x); e.target.position({ x: c.x + r, y: c.y }); onRadius(r); }} />
     </>
   );
 }

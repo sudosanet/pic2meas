@@ -9,10 +9,11 @@ import { jisBraSize } from "../src/lib/cup";
 
 const BASE = process.env.EVAL_URL ?? "http://localhost:5173";
 const EP = process.env.EVAL_EP ?? "wasm";   // headless WebGPU is unreliable
-const CONFIGS = { "B1+A2": "", "B1": "nofit", "A2": "noart", "なし": "noart&nofit" };
+const CONFIGS = { "現行": "", "胸の推定なし": "nobreast" };
+const LEVEL_JA = { bust: "バスト", underbust: "アンダーバスト", waist: "ウエスト", hip: "ヒップ" } as const;
 const GIRTHS = ["bust", "underbust", "waist", "hip"] as const;
 
-type Truth = { heightCm: number; crotchCm?: number; girthCm?: Partial<Record<(typeof GIRTHS)[number], number>>; skirtCm?: number | null };
+type Truth = { heightCm: number; crotchCm?: number; girthCm?: Partial<Record<(typeof GIRTHS)[number], number>>; levelCm?: Partial<Record<(typeof GIRTHS)[number], number>>; bra?: string; skirtCm?: number | null };
 type Out = { skirt: { lengthCm: number } | null; girthCm: Record<string, { value: number }>; bra: { label: string } | null; details: Record<string, Record<string, string>> };
 
 const browser = await chromium.launch({ args: ["--enable-unsafe-webgpu"] });
@@ -56,6 +57,7 @@ function errors(t: Truth, o: Out) {
   const e: Record<string, number> = {};
   if (t.crotchCm != null) e["股下"] = detail(o, "股下") - t.crotchCm;
   for (const g of GIRTHS) if (t.girthCm?.[g] != null) e[g] = o.girthCm[g].value - t.girthCm[g]!;
+  for (const g of GIRTHS) if (t.levelCm?.[g] != null) e[`${g}の高さ`] = detail(o, LEVEL_JA[g]) - t.levelCm[g]!;
   if (t.skirtCm != null && o.skirt) e["スカート丈"] = o.skirt.lengthCm - t.skirtCm;
   return e;
 }
@@ -71,10 +73,11 @@ const rows: { set: string; config: string; err: Record<string, number>; cup: boo
 for (const c of cases) {
   const truth: Truth = JSON.parse(readFileSync(join(c.dir, "truth.json"), "utf8"));
   const tb = truth.girthCm?.bust, tu = truth.girthCm?.underbust;
+  const cupTruth = truth.bra ?? (tb != null && tu != null ? jisBraSize(tb, tu).label : null);
   for (const [config, flags] of Object.entries(CONFIGS)) {
     try {
       const out = await measure(page, join(c.dir, "image.png"), truth.heightCm, flags);
-      const cup = tb != null && tu != null && out.bra ? out.bra.label === jisBraSize(tb, tu).label : null;
+      const cup = cupTruth && out.bra ? out.bra.label === cupTruth : null;
       rows.push({ set: c.set, config, err: errors(truth, out), cup });
       console.log(c.set, c.id, config, rows.at(-1)!.err);
     } catch (e) {

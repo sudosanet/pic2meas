@@ -1,19 +1,22 @@
 // Landmarks (automatic or hand-corrected) → measurements. Everything is measured along the skeleton, and photos
 // use the unposed standing body, so leaning, bent or sitting poses measure like upright ones.
 import type { Analysis } from "@/infer/types";
+import { capVolume, withCaps, type Caps } from "./breast";
 import { jisBraSize, type BraSize } from "./cup";
 import { FLAGS } from "./flags";
-import { arcTo, J, lengthCategory, lerp2, LEVEL_LABEL, LEVELS, mid2, onPolyline, perimeter, sectionWidth, spanAcross, type Level, type Pt } from "./measure";
+import { arcTo, J, lengthCategory, lerp2, LEVEL_LABEL, LEVELS, mid2, onPolyline, perimeter, sectionWidth, type Level, type Pt } from "./measure";
 
 export type Mode = "photo" | "illust";
 export type Side = { l: Pt; r: Pt };
-/** A girth level: height t (m above mid-hip, rest pose) and the silhouette edges a < 0 < b (px across the spine). */
+/** A girth level: height t (m above mid-hip, rest pose) and its ends a < 0 < b (px across the body, from levelAt's centre). */
 export type LevelLine = { t: number; a: number; b: number };
 export type Landmarks = {
   headTop: Pt; chin: Pt; sole: Side;
   waist: Pt; hem: Side; crotch: Pt;
   hip: Side; knee: Side; ankle: Side;
   levels: Record<Level, LevelLine>;
+  /** Breasts as spherical caps (image px; aM and h in metres), or null when not estimated. */
+  breast: Caps | null;
 };
 type Settings = { heightCm: number; mode: Mode; calibrate2D: boolean };
 export type Overrides = { skirtCm?: number; girth: Partial<Record<Level, number>> };
@@ -33,12 +36,69 @@ export function spine(a: Analysis, lm: Pick<Landmarks, "hip">) {
   return { neck, hip, len, across, at: (t: number) => lerp2(hip, neck, t / a.rest.torsoM) };
 }
 
+/**
+ * Where rest height t lies in the image: the nearest section's projected line, carried from the mesh's projection
+ * onto the current spine (a similarity mapping the mesh's neck and mid-hip onto the landmarks'), so it follows the
+ * drawing's keypoints and the user's hip handles.
+ */
+export function levelAt(a: Analysis, lm: Pick<Landmarks, "hip">, t: number) {
+  const sp = spine(a, lm), { neck: n0, hip: h0 } = a.meshAnchor;
+  // z' = A z + B on complex numbers.
+  const d0 = { x: n0.x - h0.x, y: n0.y - h0.y }, d1 = { x: sp.neck.x - sp.hip.x, y: sp.neck.y - sp.hip.y }, q = d0.x ** 2 + d0.y ** 2 || 1;
+  const A = { x: (d1.x * d0.x + d1.y * d0.y) / q, y: (d1.y * d0.x - d1.x * d0.y) / q }, scale = Math.hypot(A.x, A.y);
+  const rot = (p: Pt) => ({ x: A.x * p.x - A.y * p.y, y: A.y * p.x + A.x * p.y });
+  const map = (p: Pt) => { const r = rot({ x: p.x - h0.x, y: p.y - h0.y }); return { x: r.x + sp.hip.x, y: r.y + sp.hip.y }; };
+  let best: Analysis["sections"][number] | null = null;
+  for (const s of a.sections) if (s.line2d && (!best || Math.abs(s.t - t) < Math.abs(best.t - t))) best = s;
+  if (!best?.line2d) return null;
+  const L = best.line2d, r = rot(L.dir);
+  return { t: best.t, c: map(L.c), dir: { x: r.x / scale, y: r.y / scale }, a: L.a * scale, b: L.b * scale };
+}
+
+/** The section whose image line passes nearest to p (for dragging a level along the body). */
+export function levelNear(a: Analysis, lm: Pick<Landmarks, "hip">, p: Pt) {
+  let best: ReturnType<typeof levelAt> = null, bestD = Infinity;
+  for (const s of a.sections) {
+    const l = s.line2d && levelAt(a, lm, s.t);
+    if (!l) continue;
+    const d = Math.abs((p.x - l.c.x) * -l.dir.y + (p.y - l.c.y) * l.dir.x);   // distance across the line
+    if (d < bestD) { bestD = d; best = l; }
+  }
+  return best;
+}
+
+/**
+ * The caps on a rest section: across position from where each centre falls along the level's image line (mapped
+ * onto the hull's x range), and its distance from the line (px → m by the caps' own scale).
+ */
+function capsOnSection(a: Analysis, lm: Pick<Landmarks, "hip">, hull: Float32Array, t: number, caps: Caps) {
+  const place = levelAt(a, lm, t);
+  if (!place || caps.a <= 0) return [];
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < hull.length; i += 2) { lo = Math.min(lo, hull[i]); hi = Math.max(hi, hull[i]); }
+  const mPerPx = caps.aM / caps.a;
+  return [caps.l, caps.r].map((c) => {
+    const dx = c.x - place.c.x, dy = c.y - place.c.y, u = dx * place.dir.x + dy * place.dir.y;
+    const f = (u - place.a) / (place.b - place.a || 1);
+    return { x: lo + f * (hi - lo), dz: (dx * -place.dir.y + dy * place.dir.x) * mPerPx, aM: caps.aM, h: caps.h };
+  });
+}
+
+/** Girth growth of the rib cage from the underbust to the bust line, without breasts (calibrated in eval/). */
+export const RIB_GROWTH = 0.06;
+
+function nearestSection(a: Analysis, t: number) {
+  let s = a.sections[0];
+  for (const c of a.sections) if (c.hull.length >= 6 && Math.abs(c.t - t) < Math.abs(s.t - t)) s = c;
+  return s;
+}
+
 export function autoLandmarks(a: Analysis): Landmarks {
   const f = a.found, hip = side(a, J.lHip, J.rHip), knee = side(a, J.lKnee, J.rKnee);
   const sp = spine(a, { hip });
   const levels = Object.fromEntries(LEVELS.map((lv) => {
-    const t = a.sections[a.autoLevels[lv]]?.t ?? 0;
-    return [lv, { t, ...(spanAcross(a.person, a.w, a.h, sp.at(t), sp.across) ?? { a: -40, b: 40 }) }];
+    const t = a.sections[a.autoLevels[lv]]?.t ?? 0, l = levelAt(a, { hip }, t);
+    return [lv, { t, a: l?.a ?? -40, b: l?.b ?? 40 }];
   })) as Record<Level, LevelLine>;
   return {
     headTop: f.headTop,
@@ -49,10 +109,11 @@ export function autoLandmarks(a: Analysis): Landmarks {
     hem: { l: f.hem.l ?? f.hem.r ?? knee.l, r: f.hem.r ?? f.hem.l ?? knee.r },
     crotch: lerp2(sp.hip, mid2(knee.l, knee.r), a.rest.crotchF),
     hip, knee, ankle: side(a, J.lAnkle, J.rAnkle), levels,
+    breast: FLAGS.breast ? a.breast.caps : null,
   };
 }
 
-export type Detail = { label: string; value: number; unit: "cm" | "%" | "" };
+export type Detail = { label: string; value: number; unit: "cm" | "%" | "cc" | "" };
 export type Results = {
   skirt: { cm: number; ratio: number; category: string; source: Source } | null;
   girth: Record<Level, { cm: number; source: Source }>;
@@ -118,12 +179,19 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
   const girth = Object.fromEntries(LEVELS.map((lv) => {
     if (ov.girth[lv] != null) return [lv, { cm: ov.girth[lv]!, source: "manual" }];
     const line = lm.levels[lv];
-    let s = a.sections[0];
-    for (const c of a.sections) if (c.hull.length >= 6 && Math.abs(c.t - line.t) < Math.abs(s.t - line.t)) s = c;
+    const s = nearestSection(a, line.t);
     // 2D calibration stretches the section sideways to the silhouette width.
     const sx = st.calibrate2D ? (line.b - line.a) / pxPerCm / (sectionWidth(s.hull) * k) : 1;
     if (s.armContact) warnings.push(`${LEVEL_LABEL[lv]}の高さで腕が体に触れているため、誤差が大きくなります。`);
-    return [lv, { cm: perimeter(s.hull, sx) * k, source: same(line, auto.levels[lv]) ? "auto" : "edited" }];
+    // With the breast model, the bust is the chest wall (the underbust section, widened by the rib cage's growth up to
+    // the bust: the body model's own chest is a man's) plus the caps.
+    let hull = s.hull;
+    if (lv === "bust" && FLAGS.breast && lm.breast) {
+      const ub = nearestSection(a, lm.levels.underbust.t).hull.map((v) => v * (1 + RIB_GROWTH));
+      hull = withCaps(ub, a.rest.front, capsOnSection(a, lm, ub, line.t, lm.breast));
+    }
+    const edited = !same(line, auto.levels[lv]) || (lv === "bust" && !same(lm.breast, auto.breast));
+    return [lv, { cm: perimeter(hull, sx) * k, source: edited ? "edited" : "auto" }];
   })) as Results["girth"];
 
   const skirtEdited = !same([lm.waist, lm.hem, lm.hip, lm.knee, lm.ankle], [auto.waist, auto.hem, auto.hip, auto.knee, auto.ankle]);
@@ -149,6 +217,12 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
       cm("太ももの長さ", ht.hip - ht.knee), cm("すねの長さ", ht.knee - ht.ankle), cm("膝の高さ", ht.knee),
       cm("首の付け根の高さ", ht.neck), cm("肩の高さ", ht.shoulder), cm("頭の長さ（頭頂〜あご）", headCm),
     ] },
+    { title: "周囲長を測った高さ（床から）", items: LEVELS.map((lv) => cm(LEVEL_LABEL[lv], ht.hip + (lm.levels[lv].t / a.rest.torsoM) * (ht.neck - ht.hip))) },
+    ...(lm.breast ? [{ title: "胸（球冠モデル）", items: [
+      cm("胸の出っぱり", lm.breast.h * k),
+      cm("胸の底面の直径", 2 * lm.breast.aM * k),
+      { label: "胸の体積（片側）", value: capVolume((lm.breast.aM * k) / 100, (lm.breast.h * k) / 100) * 1e6, unit: "cc" as const },
+    ] }] : []),
     { title: "腕と肩", items: [cm("肩幅", arm.shoulders), cm("腕の長さ", arm.upper + arm.fore), cm("上腕", arm.upper), cm("前腕", arm.fore)] },
     { title: "その他の周囲長（推定）", items: [cm("首", a.rest.girthM.neck * k), cm("太もも", a.rest.girthM.thigh * k), cm("ふくらはぎ", a.rest.girthM.calf * k)] },
     { title: "比率", items: [

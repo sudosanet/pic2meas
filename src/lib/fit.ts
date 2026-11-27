@@ -39,7 +39,7 @@ export function ratios3d(joints: Float32Array, up: [number, number, number], top
 }
 
 /** Solve a small dense system A x = b (Gaussian elimination with partial pivoting). */
-function solve(A: number[][], b: number[]) {
+export function solve(A: number[][], b: number[]) {
   const n = b.length, M = A.map((row, i) => [...row, b[i]]);
   for (let c = 0; c < n; c++) {
     let p = c;

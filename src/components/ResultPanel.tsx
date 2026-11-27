@@ -29,7 +29,7 @@ function Row({ label, value, unit, source, override, onOverride }: {
 }
 
 export function ResultPanel() {
-  const { analysis, landmarks, auto, heightCm, mode, calibrate2D, overrides, setOverride, file, fitResidual } = useStore();
+  const { analysis, landmarks, auto, heightCm, mode, calibrate2D, overrides, setOverride, setLandmarks, file, fitResidual } = useStore();
   if (!analysis || !landmarks || !auto) return null;
   const r = computeResults(forMode(analysis, mode), landmarks, auto, { heightCm, mode, calibrate2D }, overrides);
 
@@ -61,6 +61,17 @@ export function ResultPanel() {
             <Row key={lv} label={LEVEL_LABEL[lv]} value={r.girth[lv].cm} unit="cm" source={r.girth[lv].source}
               override={overrides.girth[lv]} onOverride={(v) => setOverride(lv, v)} />
           ))}
+          {landmarks.breast && (() => {
+            const k = heightCm / analysis.rest.statureM, h = landmarks.breast.h * k;   // cm per body-model metre
+            return (
+              <div className="grid grid-cols-[1fr_auto_5.5rem] items-center gap-2 text-sm">
+                <span>胸の出っぱり <Badge variant="outline" className="ml-1 align-middle">{same(landmarks.breast, auto.breast) ? "自動" : "修正"}</Badge></span>
+                <span className="text-right font-semibold tabular-nums">{f1(h)} cm</span>
+                <Input aria-label="胸の出っぱりを入力" type="number" step={0.1} min={0} className="h-7 text-right" value={f1(h)}
+                  onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 0) setLandmarks((l) => ({ ...l, breast: { ...l.breast!, h: v / k } })); }} />
+              </div>
+            );
+          })()}
         </section>
 
         <section className="grid grid-cols-2 gap-2">
@@ -92,12 +103,14 @@ export function ResultPanel() {
           <Button variant="outline" size="sm" className="flex-1" onClick={() => copyText(r)}><Copy />コピー</Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          {analysis.backend === "webgpu" ? "WebGPU" : "WASM"}・切り抜き {analysis.ms.segment}ms・体型 {analysis.ms.body}ms・断面 {analysis.ms.sections}ms
+          {analysis.backend === "webgpu" ? "WebGPU" : "WASM"}・切り抜き {analysis.ms.segment}ms・体型 {analysis.ms.body}ms・胸 {analysis.ms.breast}ms・断面 {analysis.ms.sections}ms
         </p>
       </CardContent>
     </Card>
   );
 }
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 function download(href: string, name: string) {
   const a = document.createElement("a");

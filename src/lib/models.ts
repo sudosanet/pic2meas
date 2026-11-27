@@ -6,6 +6,7 @@ export const MODELS = {
   hmr: "/models/instanthmr-medium-fit2-v1.1.onnx",
   body: "/models/mhr-body-v1.1.onnx",
   pose: "/models/rtmpose-m-humanart-v1.onnx",   // illustrations' 2D keypoints (made by tools/convert_rtmpose.py)
+  normal: "/models/david-normal-vitb16-fp16-v1.onnx",   // surface normals for the breast shape (tools/convert_david.py)
 } as const;
 
 export function configureOrt() {

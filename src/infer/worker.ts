@@ -2,9 +2,11 @@
 // SegFormer (clothes) + InstantHMR (body) on onnxruntime-web, then mesh cross-sections.
 import * as Comlink from "comlink";
 import * as ort from "onnxruntime-web/webgpu";
-import { armCutouts, autoLevels, bodyFrame, edgeAlong, extent, insideRange, J, largestComponent, lerp2, mid2, perimeter, sectionAt, type Pt, type Vec3 } from "@/lib/measure";
+import { armCutouts, autoLevels, bodyFrame, edgeAlong, extent, insideRange, J, largestComponent, lerp2, mid2, perimeter, sectionAt, sectionLine2d, sectionNear, type Pt, type Vec3 } from "@/lib/measure";
 import { fitScales, ratios3d, type Ratios } from "@/lib/fit";
 import { decodeSimcc, mergeCoco, POSE_H, POSE_W } from "@/lib/keypoints";
+import { integrateNormals, rasterDepth } from "@/lib/normals";
+import { fitCaps, type Caps } from "@/lib/breast";
 import { configureOrt, MODELS } from "@/lib/models";
 import type { Analysis, Backend, InferApi, Progress } from "./types";
 
@@ -12,6 +14,9 @@ configureOrt();
 
 const MAX_SIDE = 1600, SEG = 512, CROP = 288;
 const LABEL = { background: 0, skirt: 5, dress: 7, face: 11 } as const;
+// ATR classes that never belong to the chest surface: hair, face, bare arms, bag, scarf.
+const NOT_CHEST = new Set([2, 11, 14, 15, 16, 17]);
+const NORMAL_SIZE = 512, BREAST_GRID = 160, MIN_CAP_H = 0.008;   // caps lower than 8 mm don't place the bust
 const CACHE = "pic2meas-models";
 
 async function fetchModel(url: string, onProgress: (p: Progress) => void): Promise<Uint8Array> {
@@ -52,9 +57,9 @@ function meshFaces(bytes: Uint8Array): Int32Array {
 }
 
 /** The last analysis' body parameters, for refitting its proportions to a drawing. */
-let last: { params: Float32Array; shape: Float32Array } | null = null;
+let last: { params: Float32Array; shape: Float32Array; proj: Float32Array; caps: Caps | null } | null = null;
 
-type Models = { seg: ort.InferenceSession; hmr: ort.InferenceSession; body: ort.InferenceSession; pose: ort.InferenceSession; faces: Int32Array; backend: Backend };
+type Models = { seg: ort.InferenceSession; hmr: ort.InferenceSession; body: ort.InferenceSession; pose: ort.InferenceSession; normal: ort.InferenceSession; faces: Int32Array; backend: Backend };
 let models: Promise<Models> | undefined;
 
 async function load(want: Backend | "auto", onProgress: (p: Progress) => void): Promise<Models> {
@@ -63,6 +68,7 @@ async function load(want: Backend | "auto", onProgress: (p: Progress) => void): 
   const bytes = {
     seg: await fetchModel(MODELS.seg, onProgress), hmr: await fetchModel(MODELS.hmr, onProgress),
     body: await fetchModel(MODELS.body, onProgress), pose: await fetchModel(MODELS.pose, onProgress),
+    normal: await fetchModel(MODELS.normal, onProgress),
   };
   const create = async (k: keyof typeof bytes) => {
     onProgress({ stage: "session", label: k });
@@ -75,8 +81,8 @@ async function load(want: Backend | "auto", onProgress: (p: Progress) => void): 
     }
   };
   // One after another: creating them concurrently hung WebGPU.
-  const seg = await create("seg"), hmr = await create("hmr"), body = await create("body"), pose = await create("pose");
-  return { seg, hmr, body, pose, faces: meshFaces(bytes.body), backend };
+  const seg = await create("seg"), hmr = await create("hmr"), body = await create("body"), pose = await create("pose"), normal = await create("normal");
+  return { seg, hmr, body, pose, normal, faces: meshFaces(bytes.body), backend };
 }
 
 async function loadImage(blob: Blob) {
@@ -190,6 +196,65 @@ async function artKeypoints(m: Models, { canvas }: Img, box: { x0: number; x1: n
     .map((p) => ({ x: cx - bw / 2 + (p.x / POSE_W) * bw, y: cy - bh / 2 + (p.y / POSE_H) * bh, score: p.score }));
 }
 
+// The chest's shape from DAViD's surface normals (a square around the chest, 512 px), integrated on a 160 × 160
+// grid and anchored to the posed body's depth away from the breasts: `d` is how far the surface stands in front
+// of the body model there (m). Normals: x right, y up, z towards the camera.
+async function breastShape(m: Models, { canvas, w, h }: Img, labels: Uint8Array, body: Awaited<ReturnType<typeof recoverBody>>): Promise<Analysis["breast"]> {
+  const j = body.joints2d, P = (i: number): Pt => ({ x: j[i * 2], y: j[i * 2 + 1] }), dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
+  const sh = mid2(P(J.lShoulder), P(J.rShoulder)), hp = mid2(P(J.lHip), P(J.rHip)), torso = dist(sh, hp), half = dist(P(J.lShoulder), P(J.rShoulder)) / 2;
+  const side = 1.3 * Math.max(torso, 2 * half), c = lerp2(sh, hp, 0.4), x0 = c.x - side / 2, y0 = c.y - side / 2, G = BREAST_GRID, S = NORMAL_SIZE;
+
+  const t = new OffscreenCanvas(S, S).getContext("2d", { willReadFrequently: true })!;
+  t.fillStyle = "#fff"; t.fillRect(0, 0, S, S);
+  t.drawImage(canvas, x0, y0, side, side, 0, 0, S, S);
+  const px = t.getImageData(0, 0, S, S).data, x = new Float32Array(3 * S * S);
+  for (let i = 0; i < S * S; i++) { x[i] = px[i * 4 + 2] / 255; x[S * S + i] = px[i * 4 + 1] / 255; x[2 * S * S + i] = px[i * 4] / 255; }   // BGR
+  const r = await m.normal.run({ [m.normal.inputNames[0]]: new ort.Tensor("float32", x, [1, 3, S, S]) });
+  const nn = r[m.normal.outputNames[0]].data as Float32Array, n = { x: new Float32Array(G * G), y: new Float32Array(G * G), z: new Float32Array(G * G) };
+  for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+    const k = Math.floor(((gy + 0.5) * S) / G) * S + Math.floor(((gx + 0.5) * S) / G), i = gy * G + gx;
+    const l = Math.hypot(nn[k], nn[S * S + k], nn[2 * S * S + k]) || 1;
+    n.x[i] = nn[k] / l; n.y[i] = nn[S * S + k] / l; n.z[i] = nn[2 * S * S + k] / l;
+  }
+
+  // The posed body's depth on the grid (verts are in camera space).
+  const nv = body.verts.length / 3, gxs = new Float32Array(nv), gys = new Float32Array(nv), zs = new Float32Array(nv);
+  for (let i = 0; i < nv; i++) {
+    const [u, v] = body.project([body.verts[i * 3], body.verts[i * 3 + 1], body.verts[i * 3 + 2]]);
+    gxs[i] = ((u - x0) / side) * G - 0.5; gys[i] = ((v - y0) / side) * G - 0.5; zs[i] = body.verts[i * 3 + 2];
+  }
+  const depth = rasterDepth(gxs, gys, zs, m.faces, G);
+  const f = body.project([1, 0, 1])[0] - w / 2;
+
+  // Chest cells: on the person and the body, not hair/face/bare arm, away from the arm bones; the breast region is
+  // the upper torso between the shoulders, where the normals may move the surface off the body.
+  const along = { x: (hp.x - sh.x) / torso, y: (hp.y - sh.y) / torso }, armR = (0.06 * f) / (median(depth) || 2);
+  const bones = [[J.lShoulder, J.lElbow], [J.lElbow, J.lWrist], [J.rShoulder, J.rElbow], [J.rElbow, J.rWrist]].map(([a, b]) => [P(a), P(b)]);
+  const segD = (p: Pt, a: Pt, b: Pt) => { const ab = { x: b.x - a.x, y: b.y - a.y }, q = Math.max(0, Math.min(1, ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / (ab.x ** 2 + ab.y ** 2 || 1))); return dist(p, { x: a.x + ab.x * q, y: a.y + ab.y * q }); };
+  const mask = new Uint8Array(G * G), lambda = new Float32Array(G * G), h0 = new Float32Array(G * G), roi = new Uint8Array(G * G);
+  for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+    const i = gy * G + gx, p = { x: x0 + ((gx + 0.5) / G) * side, y: y0 + ((gy + 0.5) / G) * side }, ix = Math.round(p.x), iy = Math.round(p.y);
+    const label = ix >= 0 && iy >= 0 && ix < w && iy < h ? labels[iy * w + ix] : LABEL.background;
+    if (!Number.isFinite(depth[i]) || label === LABEL.background || NOT_CHEST.has(label) || bones.some(([a, b]) => segD(p, a, b) < armR)) continue;
+    mask[i] = 1; h0[i] = -depth[i];
+    const u = (p.x - sh.x) * along.x + (p.y - sh.y) * along.y, v = (p.x - sh.x) * -along.y + (p.y - sh.y) * along.x;
+    roi[i] = u > 0.05 * torso && u < 0.65 * torso && Math.abs(v) < 0.75 * half ? 1 : 0;
+    lambda[i] = roi[i] ? 1e-4 : 1;
+  }
+  const zc = median(Array.from(depth).filter((d, i) => roi[i] && Number.isFinite(d))), s = (zc / f) * (side / G);
+  const hgt = integrateNormals(n, mask, h0, lambda, G, s);
+  const d = new Float32Array(G * G);
+  for (let i = 0; i < G * G; i++) d[i] = roi[i] && mask[i] ? hgt[i] - h0[i] : NaN;
+  // Caps start where nipples usually are: 30 % down from the shoulders, half-way out to them.
+  const at = (u: number, v: number) => ({ x: sh.x + along.x * u * torso - along.y * v * half, y: sh.y + along.y * u * torso + along.x * v * half });
+  const grid = { d, x0, y0, side, grid: G, mPerCell: s };
+  const init = { l: at(0.3, 0.5), r: at(0.3, -0.5), a: 0.44 * half };
+  // No usable surface: flat caps where the fit would have started, for the user to shape.
+  return { ...grid, caps: fitCaps(grid, init) ?? { ...init, aM: init.a * (s * G / side), h: 0 } };
+}
+
+const median = (a: ArrayLike<number>) => { const v = Array.from(a).filter(Number.isFinite).sort((p, q) => p - q); return v[v.length >> 1] ?? 0; };
+
 // The same body unposed: MHR's first 136 parameters are global transform and joint angles, the last 68 skeleton
 // scales (as SAM 3D Body assembles them). Zeroing the pose leaves an A-pose with the person's proportions (used for
 // the skeleton and the neck); a copy with the shoulders raised (params 31 right, 41 left) keeps the arms clear of
@@ -205,14 +270,18 @@ async function restBody(m: Models, params: Float32Array, shape: Float32Array) {
   return { neutral: await run(0), raised: await run(0.7) };
 }
 
-// Everything measured on the unposed body: sections, heights, crotch and limb girths.
-function restGeometry(m: Models, { neutral, raised }: Awaited<ReturnType<typeof restBody>>): Pick<Analysis, "sections" | "rest" | "autoLevels"> {
+// Everything measured on the unposed body: sections, heights, crotch and limb girths. `proj` is the posed mesh
+// projected into the image (x, y per vertex), for placing the sections there.
+function restGeometry(m: Models, { neutral, raised }: Awaited<ReturnType<typeof restBody>>, proj: Float32Array, caps: Caps | null): Pick<Analysis, "sections" | "rest" | "autoLevels"> {
   const frame = bodyFrame(neutral.joints), { origin, up } = frame;
   const upOf = (a: Float32Array, i: number) => (a[i * 3] - origin[0]) * up[0] + (a[i * 3 + 1] - origin[1]) * up[1] + (a[i * 3 + 2] - origin[2]) * up[2];
   let lo = Infinity, hi = -Infinity;
   for (let i = 0; i < neutral.verts.length / 3; i++) { const u = upOf(neutral.verts, i); lo = Math.min(lo, u); hi = Math.max(hi, u); }
   const sections: Analysis["sections"] = [], cutouts = armCutouts(raised.joints);
-  for (let t = -0.15; t <= frame.torso + 0.05; t += 0.01) sections.push({ t, ...sectionAt(raised.verts, m.faces, origin, up, frame.side, t, cutouts) });
+  for (let t = -0.15; t <= frame.torso + 0.05; t += 0.01) {
+    const { hull, armContact, edges } = sectionAt(raised.verts, m.faces, origin, up, frame.side, t, cutouts);
+    sections.push({ t, hull, armContact, line2d: sectionLine2d(edges, proj) });
+  }
   const jointUp = Float32Array.from({ length: 70 }, (_, i) => upOf(neutral.joints, i));
   const ju = (i: number) => jointUp[i], avg = (a: number, b: number) => (ju(a) + ju(b)) / 2;
 
@@ -237,11 +306,21 @@ function restGeometry(m: Models, { neutral, raised }: Awaited<ReturnType<typeof 
   return {
     sections,
     rest: {
-      statureM: hi - lo, floorM: lo, torsoM: frame.torso, jointUp, joints: neutral.joints,
+      statureM: hi - lo, floorM: lo, torsoM: frame.torso, front: frame.front, jointUp, joints: neutral.joints,
       crotchF: (hipUp - crotch) / (hipUp - kneeUp), girthM: { neck, thigh, calf },
     },
-    autoLevels: autoLevels(sections, frame.torso, frame.front),
+    autoLevels: autoLevels(sections, frame.torso, frame.front, ...capLevels(sections, caps)),
   };
+}
+
+// The bust at the caps' centres, the underbust at their lower edge (towards the hips in the image).
+function capLevels(sections: Analysis["sections"], caps: Caps | null): [number?, number?] {
+  if (!caps || caps.h < MIN_CAP_H) return [];
+  const c = mid2(caps.l, caps.r), dx = caps.r.x - caps.l.x, dy = caps.r.y - caps.l.y, len = Math.hypot(dx, dy) || 1;
+  let down = { x: -dy / len, y: dx / len };
+  if (down.y < 0) down = { x: -down.x, y: -down.y };
+  const b = sectionNear(sections, c), u = sectionNear(sections, { x: c.x + down.x * caps.a, y: c.y + down.y * caps.a });
+  return [sections[b]?.t, sections[u]?.t];
 }
 
 // Projected mesh silhouette. Triangles get the same winding so front and back faces don't cancel, and are
@@ -283,7 +362,7 @@ const api: InferApi = {
     if (!last) throw new Error("no analysis to refit");
     const { shape } = last;
     const fit = await fitScales((p) => bodyRatios(m, p, shape), target, last.params);
-    const geo = restGeometry(m, await restBody(m, fit.params, shape));
+    const geo = restGeometry(m, await restBody(m, fit.params, shape), last.proj, last.caps);
     return Comlink.transfer({ ...geo, residual: fit.residual }, geo.sections.map((s) => s.hull.buffer));
   },
 
@@ -310,15 +389,14 @@ const api: InferApi = {
     if (!box) throw new Error("人物が見つかりませんでした");
 
     onProgress({ stage: "body", label: "骨格と3D体型" });
-    const [[body, rest], msBody] = await time(async () => {
+    const [[body, rest, shapeFrom], msBody] = await time(async () => {
       const posed = await recoverBody(m, img, box);
       // The body model reads shape best from an upright person: if the spine leans, run it again on the image
       // rotated upright and take the body shape from there.
       const j = posed.joints2d, hipX = (j[J.lHip * 2] + j[J.rHip * 2]) / 2, hipY = (j[J.lHip * 2 + 1] + j[J.rHip * 2 + 1]) / 2;
       const lean = Math.atan2(j[J.neck * 2] - hipX, hipY - j[J.neck * 2 + 1]);
       const shapeFrom = Math.abs(lean) > (10 * Math.PI) / 180 ? await recoverBody(m, ...rotated(img, person, -lean, box)) : posed;
-      last = { params: shapeFrom.params, shape: shapeFrom.shape };
-      return [posed, await restBody(m, shapeFrom.params, shapeFrom.shape)] as const;
+      return [posed, await restBody(m, shapeFrom.params, shapeFrom.shape), shapeFrom] as const;
     });
 
     const comp = (cls: number) => largestComponent(labels.map((l) => (l === cls ? 1 : 0)), w, h);
@@ -335,19 +413,25 @@ const api: InferApi = {
     const joints2dArt = mergeCoco(body.joints2d, await artKeypoints(m, img, box), (upY(J.neck) - sh) / (sh - hp));
     const foundArt = findLandmarks(joints2dArt, person, garment, kind, face, w, h);
 
+    onProgress({ stage: "breast", label: "胸の形" });
+    const [breast, msBreast] = await time(() => breastShape(m, img, labels, body));
+
     onProgress({ stage: "sections", label: "断面の計算" });
     const [geo, msSec] = await time(() => {
-      const meshPoints = new Float32Array(Math.ceil(body.verts.length / 3 / 6) * 2);
-      for (let i = 0, k = 0; i < body.verts.length; i += 18) meshPoints.set(body.project([body.verts[i], body.verts[i + 1], body.verts[i + 2]]), (k++) * 2);
-      return { meshPoints, meshMask: meshSilhouette(body.verts, m.faces, body.project, w, h), ...restGeometry(m, rest) };
+      const proj = new Float32Array((body.verts.length / 3) * 2), meshPoints = new Float32Array(Math.ceil(body.verts.length / 3 / 6) * 2);
+      for (let i = 0; i < body.verts.length / 3; i++) proj.set(body.project([body.verts[i * 3], body.verts[i * 3 + 1], body.verts[i * 3 + 2]]), i * 2);
+      for (let i = 0, k = 0; i < proj.length / 2; i += 6) meshPoints.set([proj[i * 2], proj[i * 2 + 1]], (k++) * 2);
+      last = { params: shapeFrom.params, shape: shapeFrom.shape, proj, caps: breast.caps };
+      const j = body.joints2d, pt = (i: number) => ({ x: j[i * 2], y: j[i * 2 + 1] });
+      return { meshPoints, meshMask: meshSilhouette(body.verts, m.faces, body.project, w, h), meshAnchor: { neck: pt(J.neck), hip: mid2(pt(J.lHip), pt(J.rHip)) }, ...restGeometry(m, rest, proj, breast.caps) };
     });
 
     const result: Analysis = {
-      w, h, backend: m.backend, ms: { segment: msSeg, body: msBody, sections: msSec },
+      w, h, backend: m.backend, ms: { segment: msSeg, body: msBody, breast: msBreast, sections: msSec }, breast,
       transparent: img.alpha != null, person, garment, garmentKind: hasGarment ? g.kind : "none",
       cut: box.touchTop || box.touchBottom, joints2d: body.joints2d, found, art: { joints2d: joints2dArt, found: foundArt }, ...geo,
     };
-    return Comlink.transfer(result, [person.buffer, garment.buffer, body.joints2d.buffer, joints2dArt.buffer, geo.meshPoints.buffer, geo.meshMask.buffer, ...geo.sections.map((s) => s.hull.buffer)]);
+    return Comlink.transfer(result, [person.buffer, garment.buffer, body.joints2d.buffer, joints2dArt.buffer, geo.meshPoints.buffer, geo.meshMask.buffer, breast.d.buffer, ...geo.sections.map((s) => s.hull.buffer)]);
   },
 };
 

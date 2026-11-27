@@ -3,7 +3,8 @@
 import { VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName } from "@pixiv/three-vrm";
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { armCutouts, autoLevels, bodyFrame, J, perimeter, sectionAt, type Section } from "@/lib/measure";
+import { jisBraSize } from "@/lib/cup";
+import { armCutouts, bodyFrame, J, perimeter, sectionAt, type Section } from "@/lib/measure";
 
 const canvas = document.getElementById("c") as HTMLCanvasElement;
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
@@ -60,13 +61,22 @@ function truth(vrm: VRM) {
   const all = ys(skin, () => true), floor = Math.min(...all), top = Math.max(...all);
   const sections: Section[] = [];
   for (let t = -0.15; t <= frame.torso + 0.05; t += 0.01) sections.push({ t, ...sectionAt(torso.verts, torso.faces, origin, up, side, t, armCutouts(j)) });
-  const lv = autoLevels(sections, frame.torso, frame.front);
-  const g = (i: number) => perimeter(sections[i].hull) * 100;
+  // Levels as a tape measure would find them (independent of the app's autoLevels): bust at the furthest
+  // forward point of the chest, underbust where the chest recedes most below it, waist/hip at min/max girth.
+  const T = frame.torso, per = sections.map((s) => (s.hull.length >= 6 ? perimeter(s.hull) : NaN));
+  const reach = sections.map((s) => { let m = -Infinity; for (let i = 1; i < s.hull.length; i += 2) m = Math.max(m, frame.front * s.hull[i]); return m; });
+  const best = (score: number[], lo: number, hi: number, sign: 1 | -1) => sections.reduce((b, s, i) => (s.t >= lo && s.t <= hi && Number.isFinite(score[i]) && (b < 0 || sign * score[i] > sign * score[b]) ? i : b), -1);
+  const bust = best(reach, 0.5 * T, 0.9 * T, 1), underbust = best(reach, sections[bust].t - 0.15, sections[bust].t - 0.03, -1);
+  const lv = { bust, underbust, waist: best(per, 0.2 * T, sections[underbust].t - 0.03, -1), hip: best(per, -0.1, 0.15, 1) };
+  const g = (i: number) => per[i] * 100, hOf = (i: number) => (origin[1] + sections[i].t * up[1] - floor) * 100;
   const crotch = Math.min(...ys(skin, (x) => Math.abs(x - origin[0]) < 0.015).filter((y) => y < origin[1]));
   const front = ys(bottoms, (x, z) => Math.abs(x - origin[0]) < 0.05 && z > origin[2]);
   return {
     heightCm: (top - floor) * 100, crotchCm: (crotch - floor) * 100,
     girthCm: { bust: g(lv.bust), underbust: g(lv.underbust), waist: g(lv.waist), hip: g(lv.hip) },
+    levelCm: { bust: hOf(lv.bust), underbust: hOf(lv.underbust), waist: hOf(lv.waist), hip: hOf(lv.hip) },
+    projectionCm: (reach[lv.bust] - reach[lv.underbust]) * 100,
+    bra: jisBraSize(g(lv.bust), g(lv.underbust)).label,
     skirtCm: front.length ? (Math.max(...front) - Math.min(...front)) * 100 : null,
   };
 }

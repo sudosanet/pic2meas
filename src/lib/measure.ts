@@ -156,24 +156,25 @@ const segDist = (p: Vec3, { a, b }: Cutout) => {
  * the body axis, its convex hull (x along `side`, y along up × side). `link` bridges the gap an arm cutout leaves.
  * ponytail: the convex hull overestimates concave sections by a few %.
  */
-export function sectionAt(verts: Float32Array, faces: Int32Array, origin: Vec3, up: Vec3, side: Vec3, t: number, cutouts: Cutout[] = [], link = 0.1): Omit<Section, "t"> {
+export function sectionAt(verts: Float32Array, faces: Int32Array, origin: Vec3, up: Vec3, side: Vec3, t: number, cutouts: Cutout[] = [], link = 0.1): Omit<Section, "t"> & { edges: SectionEdges } {
   const fwd = cross(up, side), n = verts.length / 3;
   const hgt = new Float32Array(n), a = new Float32Array(n), b = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const d = sub([verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]], origin);
     hgt[i] = dot(d, up) - t; a[i] = dot(d, side); b[i] = dot(d, fwd);
   }
-  const pts: number[] = [], removed: number[] = [];
+  const pts: number[] = [], removed: number[] = [], src: number[] = [];
   for (let f = 0; f < faces.length; f += 3) for (let e = 0; e < 3; e++) {
     const p = faces[f + e], q = faces[f + ((e + 1) % 3)];
     if (p < q && hgt[p] < 0 !== hgt[q] < 0) {
       const s = hgt[p] / (hgt[p] - hgt[q]);
       const v = [0, 1, 2].map((k) => verts[p * 3 + k] + s * (verts[q * 3 + k] - verts[p * 3 + k])) as Vec3;
-      (cutouts.some((c) => segDist(v, c) < c.r) ? removed : pts).push(a[p] + s * (a[q] - a[p]), b[p] + s * (b[q] - b[p]));
+      if (cutouts.some((c) => segDist(v, c) < c.r)) removed.push(a[p] + s * (a[q] - a[p]), b[p] + s * (b[q] - b[p]));
+      else { pts.push(a[p] + s * (a[q] - a[p]), b[p] + s * (b[q] - b[p])); src.push(p, q, s); }
     }
   }
   const m = pts.length / 2;
-  if (m < 3) return { hull: new Float32Array(), armContact: 0 };
+  if (m < 3) return { hull: new Float32Array(), armContact: 0, edges: [] };
 
   // Flood fill from the point nearest the axis, neighbours looked up in a grid of link-sized cells.
   const cell = (v: number) => Math.floor(v / link), grid = new Map<string, number[]>();
@@ -190,14 +191,45 @@ export function sectionAt(verts: Float32Array, faces: Int32Array, origin: Vec3, 
   }
 
   // Count removed arm points within 2 cm of the body.
-  const comp: number[] = [], near = new Set<string>(), C = 0.02;
-  for (let i = 0; i < m; i++) if (inComp[i]) { comp.push(pts[i * 2], pts[i * 2 + 1]); near.add(`${Math.floor(pts[i * 2] / C)},${Math.floor(pts[i * 2 + 1] / C)}`); }
+  const comp: number[] = [], edges: SectionEdges = [], near = new Set<string>(), C = 0.02;
+  for (let i = 0; i < m; i++) if (inComp[i]) { comp.push(pts[i * 2], pts[i * 2 + 1]); edges.push(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]); near.add(`${Math.floor(pts[i * 2] / C)},${Math.floor(pts[i * 2 + 1] / C)}`); }
   let armContact = 0;
   for (let i = 0; i < removed.length; i += 2) {
     const cx = Math.floor(removed[i] / C), cy = Math.floor(removed[i + 1] / C);
     if ([-1, 0, 1].some((dx) => [-1, 0, 1].some((dy) => near.has(`${cx + dx},${cy + dy}`)))) armContact++;
   }
-  return { hull: convexHull(comp), armContact };
+  return { hull: convexHull(comp), armContact, edges };
+}
+
+/** The mesh edges a section crossed: [vertex p, vertex q, fraction from p to q, …]. */
+export type SectionEdges = number[];
+/** A section as it appears in the image: centre, unit direction across the body, and signed ends (px). */
+export type Line2d = { c: Pt; dir: Pt; a: number; b: number };
+
+/**
+ * Where a rest-pose section lies in the image: its crossing points re-made from the posed mesh's projected vertices
+ * (same topology, `proj` = x, y per vertex), spread along their principal axis. Arms were cut out of the section,
+ * so the width is the torso's alone.
+ */
+export function sectionLine2d(edges: SectionEdges, proj: Float32Array): Line2d | null {
+  const n = edges.length / 3;
+  if (n < 3) return null;
+  const xs = new Float32Array(n), ys = new Float32Array(n);
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) {
+    const p = edges[i * 3], q = edges[i * 3 + 1], s = edges[i * 3 + 2];
+    xs[i] = proj[p * 2] + s * (proj[q * 2] - proj[p * 2]); ys[i] = proj[p * 2 + 1] + s * (proj[q * 2 + 1] - proj[p * 2 + 1]);
+    mx += xs[i] / n; my += ys[i] / n;
+  }
+  let sxx = 0, sxy = 0, syy = 0;
+  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  let dir = { x: Math.cos(ang), y: Math.sin(ang) };
+  if (dir.x < 0) dir = { x: -dir.x, y: -dir.y };
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < n; i++) { const u = (xs[i] - mx) * dir.x + (ys[i] - my) * dir.y; lo = Math.min(lo, u); hi = Math.max(hi, u); }
+  const mid = (lo + hi) / 2;
+  return { c: { x: mx + dir.x * mid, y: my + dir.y * mid }, dir, a: lo - mid, b: hi - mid };
 }
 
 // MHR70 joint indices.
@@ -230,18 +262,36 @@ export type Level = "bust" | "underbust" | "waist" | "hip";
 export const LEVELS: Level[] = ["bust", "underbust", "waist", "hip"];
 export const LEVEL_LABEL: Record<Level, string> = { bust: "バスト", underbust: "アンダーバスト", waist: "ウエスト", hip: "ヒップ" };
 
+/** Index of the section whose image line passes nearest to p (distance across the line), or -1. */
+export function sectionNear(sections: { line2d: Line2d | null }[], p: Pt) {
+  let best = -1, bestD = Infinity;
+  sections.forEach((s, i) => {
+    const l = s.line2d;
+    if (!l) return;
+    const d = Math.abs((p.x - l.c.x) * -l.dir.y + (p.y - l.c.y) * l.dir.x);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+
+/** Where the girth levels sit when nothing better is known, as fractions of the mid-hip-to-neck length. */
+export const LEVEL_PRIOR = { bust: 0.66, bustRange: 0.06, underbustDrop: 0.17, gap: 0.03 };
+
 /**
- * Section index for each girth. Bust: furthest forward; underbust: most receded 5–13 cm below it.
- * Waist/hip: min/max girth, preferring sections no arm touched.
+ * Section index for each girth, always ordered bust > underbust > waist > hip with ≥ 3 cm between them.
+ * Bust: `bustT` (e.g. from a breast model) or the furthest forward section near the prior; underbust: `underbustT`
+ * or the prior drop below the bust; waist/hip: min/max girth below that, preferring sections no arm touched.
  */
-export function autoLevels(sections: Section[], torso: number, front: 1 | -1 = 1): Record<Level, number> {
-  const per = sections.map((s) => (s.hull.length >= 6 ? perimeter(s.hull) : NaN));
+export function autoLevels(sections: Section[], torso: number, front: 1 | -1 = 1, bustT?: number, underbustT?: number): Record<Level, number> {
+  const P = LEVEL_PRIOR, ok = (s: Section) => s.hull.length >= 6;
+  const per = sections.map((s) => (ok(s) ? perimeter(s.hull) : NaN));
   const reach = sections.map((s) => {
-    if (s.hull.length < 6) return NaN;
+    if (!ok(s)) return NaN;
     let m = -Infinity;
     for (let i = 1; i < s.hull.length; i += 2) m = Math.max(m, front * s.hull[i]);
     return m;
   });
+  const nearest = (t: number) => sections.reduce((b, s, i) => (ok(s) && (b < 0 || Math.abs(s.t - t) < Math.abs(sections[b].t - t)) ? i : b), -1);
   const pick = (score: number[], lo: number, hi: number, better: (a: number, b: number) => boolean, preferFree = false) => {
     for (const free of preferFree ? [true, false] : [false]) {
       let best = -1;
@@ -250,16 +300,14 @@ export function autoLevels(sections: Section[], torso: number, front: 1 | -1 = 1
       });
       if (best >= 0) return best;
     }
-    return -1;
+    return nearest(hi);
   };
-  const bust = pick(reach, 0.55 * torso, 0.9 * torso, (a, b) => a > b);
-  const bt = bust >= 0 ? sections[bust].t : 0.7 * torso;
-  return {
-    bust,
-    underbust: pick(reach, bt - 0.13, bt - 0.05, (a, b) => a < b),
-    waist: pick(per, 0.25 * torso, 0.55 * torso, (a, b) => a < b, true),
-    hip: pick(per, -0.06, 0.12, (a, b) => a > b, true),
-  };
+  const bust = bustT != null ? nearest(bustT) : pick(reach, (P.bust - P.bustRange) * torso, (P.bust + P.bustRange) * torso, (a, b) => a > b);
+  const bt = sections[bust]?.t ?? P.bust * torso;
+  const underbust = nearest(Math.min(underbustT ?? bt - P.underbustDrop * torso, bt - P.gap));
+  const ut = sections[underbust]?.t ?? bt - P.underbustDrop * torso;
+  const waist = pick(per, 0.25 * torso, ut - P.gap, (a, b) => a < b, true), wt = sections[waist]?.t ?? 0.4 * torso;
+  return { bust, underbust, waist, hip: pick(per, -0.06, Math.min(0.12, wt - P.gap), (a, b) => a > b, true) };
 }
 
 /** Width of a section along x. */
