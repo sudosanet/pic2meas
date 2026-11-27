@@ -92,6 +92,22 @@ function capsOnSection(a: Analysis, lm: Pick<Landmarks, "hip">, hull: Float32Arr
  */
 export const ILLUST_CUP = { c0: -28.10, h: 0.258, hip: 0.326 };
 
+/**
+ * Corrections for the body model's girths, least squares against published sizes. Waist and hip: 13 full-body photos
+ * (0.787, 0.857; leave-one-out error 15 → 4 cm) and 40 anime characters (0.771, 0.838) agree, so both modes use them.
+ * Underbust, photos only: 0.89 makes the cups of 55 photos unbiased (mean error 3.9 → 1.9 cups); illustrations' cups
+ * are calibrated on the uncorrected underbust (ILLUST_CUP).
+ */
+export const GIRTH_SCALE = { waist: 0.79, hip: 0.85, underbustPhoto: 0.89 };
+
+const CUP_ORDER = ["AA", "A", "B", "C", "D", "E", "F", "G", "H", "I"];
+/**
+ * A breast circle's radius for a cup index (AA = 0) as a fraction of the two centres' spacing: from ~0.3 (small,
+ * well apart) to ~0.55 at J (touching). Relative to the drawing rather than in cm, because drawings slim the torso
+ * and real-size breasts would look oversized on it. Only for drawing the circles.
+ */
+export const cupRadiusOfSpacing = (cup: number) => 0.3 + 0.022 * Math.max(-1, cup);
+
 /** Girth growth of the rib cage from the underbust to the bust line, without breasts (calibrated in eval/). */
 export const RIB_GROWTH = 0.06;
 
@@ -171,6 +187,8 @@ export type Results = {
   skirt: { cm: number; ratio: number; category: string; source: Source } | null;
   girth: Record<Level, { cm: number; source: Source }>;
   bra: BraSize | null;
+  /** The breast circles as drawn: centres from the caps, radius from the cup (or the user's circle once edited). */
+  breastCircles: { l: Pt; r: Pt; a: number } | null;
   headRatio: number;
   details: { title: string; items: Detail[] }[];
   warnings: string[];
@@ -258,6 +276,13 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     girth.bust = { cm: girth.underbust.cm + Math.max(0, 7.5 + 2.5 * cup), source: girth.bust.source };
   }
 
+  // The body model's sections run large at the waist and hips, and (in photos) under the bust: scale factors fitted to
+  // published sizes (see GIRTH_SCALE). Hand-entered values are left alone.
+  for (const lv of ["waist", "hip", "underbust"] as const) {
+    const f = lv === "underbust" ? (st.mode === "photo" ? GIRTH_SCALE.underbustPhoto : 1) : GIRTH_SCALE[lv];
+    if (girth[lv].source !== "manual") girth[lv] = { ...girth[lv], cm: girth[lv].cm * f };
+  }
+
   const skirtEdited = !same([lm.waist, lm.hem, lm.hip, lm.knee, lm.ankle], [auto.waist, auto.hem, auto.hip, auto.knee, auto.ankle]);
   const category = lengthCategory(mean(uOf("l"), uOf("r")));
   const skirtCm = ht.waist - ht.hem;
@@ -295,9 +320,14 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     ] },
   ];
 
+  const bra = girth.bust.cm > 0 && girth.underbust.cm > 0 && !guessedBreast ? jisBraSize(girth.bust.cm, girth.underbust.cm) : null;
+  // Untouched circles show the cup's typical breast base (so a big circle means a big cup); edited ones the user's.
+  const cupIndex = bra ? (bra.cup === "AA未満" ? -1 : bra.cup === "I超" ? 10 : CUP_ORDER.indexOf(bra.cup)) : null;
+  const breastCircles = lm.breast && (breastEdited || cupIndex == null
+    ? { l: lm.breast.l, r: lm.breast.r, a: lm.breast.a }
+    : { l: lm.breast.l, r: lm.breast.r, a: cupRadiusOfSpacing(cupIndex) * Math.hypot(lm.breast.r.x - lm.breast.l.x, lm.breast.r.y - lm.breast.l.y) });
   return {
-    skirt, girth, details,
-    bra: girth.bust.cm > 0 && girth.underbust.cm > 0 && !guessedBreast ? jisBraSize(girth.bust.cm, girth.underbust.cm) : null,
+    skirt, girth, details, bra, breastCircles,
     headRatio: H / headCm, warnings,
   };
 }

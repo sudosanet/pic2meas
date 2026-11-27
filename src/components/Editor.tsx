@@ -3,13 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Group, Image as KImage, Layer, Line, Stage, Text } from "react-konva";
 import { editorStage } from "@/lib/editorStage";
 import { LEVELS, LEVEL_LABEL, mid2, type Level, type Pt } from "@/lib/measure";
-import { followCaps, followWaist, forMode, waistLinked, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
+import { computeResults, followCaps, followWaist, forMode, waistLinked, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
 import { useStore } from "@/store";
 
 const COLORS = { breast: "#db2777", head: "#64748b", crotch: "#7c3aed", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308", bone: "rgba(234,179,8,0.6)" };
 
 export function Editor() {
-  const { bitmap, analysis, landmarks, layers, mode, setLandmarks } = useStore();
+  const { bitmap, analysis, landmarks, auto, heightCm, calibrate2D, overrides, layers, mode, setLandmarks } = useStore();
   const box = useRef<HTMLDivElement>(null), stageRef = useRef<Konva.Stage>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
@@ -82,6 +82,7 @@ export function Editor() {
           </Layer>
           {analysis && landmarks && (() => {
             const am = forMode(analysis, mode), lm = landmarks, sp = spine(am, lm);
+            const circles = auto && computeResults(am, lm, auto, { heightCm, mode, calibrate2D }, overrides).breastCircles;
             const pt = (key: "headTop" | "chin" | "crotch", label: string, color: string) => (
               <Handle p={lm[key]} u={u} color={color} label={label} onChange={(p) => set((l) => ({ ...l, [key]: p }))} />
             );
@@ -105,12 +106,13 @@ export function Editor() {
                       return c ? { ...next, waist: c } : next;
                     })} />
                 ))}
-                {layers.levels && lm.breast && (["l", "r"] as const).map((k) => (
-                  <Cap key={k} c={lm.breast![k]} a={lm.breast!.a} u={u}
+                {layers.levels && lm.breast && circles && (["l", "r"] as const).map((k) => (
+                  <Cap key={k} c={lm.breast![k]} a={circles.a} u={u}
                     onMove={(c) => set((l) => followCaps(am, { ...l, breast: { ...l.breast!, [k]: c } }))}
                     onRadius={(r) => set((l) => {
-                      const aM = (l.breast!.aM / l.breast!.a) * r, ratio = l.breast!.h / l.breast!.aM;   // keep the shape, scale the size
-                      return followCaps(am, { ...l, breast: { ...l.breast!, a: r, aM, h: ratio * aM } });
+                      // Scale the breast with the circle (same shape): from the radius as drawn, not the fitted one.
+                      const b = l.breast!, mPerPx = b.aM / b.a, f = r / circles.a;
+                      return followCaps(am, { ...l, breast: { ...b, a: r, aM: r * mPerPx, h: b.h * f } });
                     })} />
                 ))}
                 {pt("headTop", "頭頂", COLORS.head)}

@@ -4,7 +4,7 @@
 // A case is image.png + truth.json: { heightCm, crotchCm?, girthCm?: { bust?, underbust?, waist?, hip? }, skirtCm?,
 // bra? (full JIS label), cup? (cup letter alone) }.
 // EVAL_DATA / EVAL_OUT move the data and results (e.g. outside the repo for images you may not commit);
-// EVAL_CONFIGS picks configurations by name (comma-separated).
+// EVAL_CONFIGS picks configurations by name (comma-separated); EVAL_MODE forces photo or illust for every set.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { chromium, type Page } from "playwright";
@@ -107,7 +107,7 @@ for (const c of cases) {
   const cupTruth = truth.cup ?? (labelTruth ? labelTruth.replace(/\d+$/, "") : null);
   for (const [config, flags] of Object.entries(CONFIGS)) {
     try {
-      const out = await measure(page, join(c.dir, "image.png"), truth.heightCm, flags, c.set === "photo" ? "photo" : "illust");
+      const out = await measure(page, join(c.dir, "image.png"), truth.heightCm, flags, (process.env.EVAL_MODE as "photo" | "illust" | undefined) ?? (c.set === "photo" ? "photo" : "illust"));
       const cupDiff = cupTruth && out.bra ? cupIndex(out.bra.cup) - cupIndex(cupTruth) : null;
       rows.push({ set: c.set, id: c.id, config, err: errors(truth, out), cup: cupDiff == null ? null : cupDiff === 0, cupDiff, inner: { ...(await internals(page, truth.heightCm)), ...Object.fromEntries(Object.entries(out.girthCm).map(([k, v]) => [`${k}Cm`, v.value])) } });
       console.log(c.set, c.id, config, rows.at(-1)!.err, "cup", cupDiff);

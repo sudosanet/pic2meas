@@ -78,10 +78,17 @@ export function fitCaps(g: Grid, init: { l: Pt; r: Pt; a: number }, iterations =
   const prior = 0.02 * Math.sqrt(cells.length);   // weak: data across the caps outweighs it
   const res = (q: number[]) => [...cells.map((i) => both(q, i) - dd[i]), prior * (q[5] - CAP_RATIO * q[4] * g.mPerCell)];
   const cost = (r: number[]) => r.reduce((s, v) => s + v * v, 0);
-  // Centres move at most half a radius sideways (so they can't wander onto the sleeves) and a radius up or down.
-  const near = (v: number, v0: number, k: number) => Math.min(v0 + k * aMax, Math.max(v0 - k * aMax, v));
+  // Centres stay in their windows around the skeleton's guess (see inWindow).
+  const L0 = toG(init.l), R0 = toG(init.r);
+  const keep = (x: number, y: number, c0: Pt): [number, number] => {
+    if (inWindow({ x, y }, c0, L0, R0, aMax)) return [x, y];
+    // Pull back along the line to c0 until inside.
+    let t = 1;
+    while (t > 0 && !inWindow({ x: c0.x + (x - c0.x) * t, y: c0.y + (y - c0.y) * t }, c0, L0, R0, aMax)) t -= 0.05;
+    return [c0.x + (x - c0.x) * Math.max(0, t), c0.y + (y - c0.y) * Math.max(0, t)];
+  };
   const clamp = (q: number[]) => {
-    q[0] = near(q[0], L.x, 0.5); q[1] = near(q[1], L.y, 1); q[2] = near(q[2], R.x, 0.5); q[3] = near(q[3], R.y, 1);
+    [q[0], q[1]] = keep(q[0], q[1], L0); [q[2], q[3]] = keep(q[2], q[3], R0);
     q[4] = Math.min(aMax, Math.max(0.1 * aMax, q[4])); q[5] = Math.min(0.15, Math.max(0, q[5]));
     return q;
   };
@@ -103,6 +110,15 @@ export function fitCaps(g: Grid, init: { l: Pt; r: Pt; a: number }, iterations =
   const inside = cells.filter((i) => Math.min(Math.hypot(X(i) - p[0], Y(i) - p[1]), Math.hypot(X(i) - p[2], Y(i) - p[3])) < p[4]);
   const mean = inside.reduce((s, i) => s + dd[i], 0) / (inside.length || 1);
   const sst = inside.reduce((s, i) => s + (dd[i] - mean) ** 2, 0), sse = inside.reduce((s, i) => s + (both(p, i) - dd[i]) ** 2, 0);
+  // Breasts sit side by side: if the pair leans more than 15° from the skeleton's left–right line, level them.
+  {
+    const sep = Math.hypot(R0.x - L0.x, R0.y - L0.y) || 1, ux = (R0.x - L0.x) / sep, uy = (R0.y - L0.y) / sep;
+    const dx = p[2] - p[0], dy = p[3] - p[1], across = dx * ux + dy * uy, along = -dx * uy + dy * ux;
+    if (Math.abs(along) > Math.tan((15 * Math.PI) / 180) * Math.abs(across)) {
+      const half = along / 2;
+      p[0] -= uy * half; p[1] += ux * half; p[2] += uy * half; p[3] -= ux * half;
+    }
+  }
   const px = (x: number, y: number): Pt => ({ x: g.x0 + (x + 0.5) * cell, y: g.y0 + (y + 0.5) * cell });
   return { l: px(p[0], p[1]), r: px(p[2], p[3]), a: p[4] * cell, aM: p[4] * g.mPerCell, h: p[5], src: "normals", conf: sst > 0 ? Math.max(0, 1 - sse / sst) : 0 };
 }
@@ -121,14 +137,22 @@ function findBumps(g: Grid, cells: number[], background: (i: number) => number, 
     }
     if (n > k * k) sm[i] = sum / n;
   }
-  const order = cells.filter((i) => Number.isFinite(sm[i])).sort((a, b) => sm[b] - sm[a]);
-  const first = order[0];
-  if (first == null || sm[first] < MIN_BUMP) return { L: L0, R: R0 };
-  const fx = first % G, fy = (first / G) | 0;
-  const second = order.find((i) => { const dx = Math.abs((i % G) - fx), dy = Math.abs(((i / G) | 0) - fy); return Math.hypot(dx, dy) >= 1.2 * aMax && dx > dy; });
-  if (second == null || sm[second] < MIN_BUMP) return { L: L0, R: R0 };
-  const a = { x: fx, y: fy }, b = { x: second % G, y: (second / G) | 0 };
-  return a.x < b.x === L0.x < R0.x ? { L: a, R: b } : { L: b, R: a };
+  // Each side on its own, only near where the skeleton puts that nipple: a bump on a sleeve or an arm can't pull
+  // the circles apart.
+  const best = (c0: Pt) => {
+    let bi = -1;
+    for (const i of cells) if (Number.isFinite(sm[i]) && inWindow({ x: i % G, y: (i / G) | 0 }, c0, L0, R0, aMax) && (bi < 0 || sm[i] > sm[bi])) bi = i;
+    return bi >= 0 && sm[bi] >= MIN_BUMP ? { x: bi % G, y: (bi / G) | 0 } : null;
+  };
+  const l = best(L0), rr = best(R0);
+  return l && rr ? { L: l, R: rr } : { L: L0, R: R0 };
+}
+
+/** Where a breast's centre may be: within 20 % of the nipples' spacing sideways and 0.6 aMax up or down of c0. */
+function inWindow(p: Pt, c0: Pt, L0: Pt, R0: Pt, aMax: number) {
+  const sep = Math.hypot(R0.x - L0.x, R0.y - L0.y) || 1, ux = (R0.x - L0.x) / sep, uy = (R0.y - L0.y) / sep;
+  const dx = p.x - c0.x, dy = p.y - c0.y, across = dx * ux + dy * uy, along = -dx * uy + dy * ux;
+  return Math.abs(across) <= 0.2 * sep && Math.abs(along) <= 0.6 * aMax;
 }
 
 /** A bump lower than this (m) above the torso's curve isn't taken as a breast's position. */
