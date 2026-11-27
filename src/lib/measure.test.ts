@@ -46,7 +46,7 @@ function fakeAnalysis(rot: number): { a: Analysis; P: (p: Pt) => Pt } {
     P,
     a: {
       w: 400, h: 400, backend: "wasm", ms: { segment: 0, body: 0, breast: 0, sections: 0 }, transparent: false,
-      breast: { d: new Float32Array(0), x0: 0, y0: 0, side: 1, grid: 0, mPerCell: 0, caps: { l: { x: 190, y: 130 }, r: { x: 210, y: 130 }, a: 8, aM: 0.04, h: 0 } },
+      breast: { d: new Float32Array(0), x0: 0, y0: 0, side: 1, grid: 0, mPerCell: 0, caps: { l: P({ x: 185, y: 130 }), r: P({ x: 215, y: 130 }), a: 8, aM: 0.04, h: 0.03, src: "normals", conf: 1 } },
       person: new Uint8Array(160000).fill(1), garment: new Uint8Array(160000), garmentKind: "skirt", cut: false, joints2d: j2,
       found, art: { joints2d: j2, found },
       meshPoints: new Float32Array(), meshMask: new Uint8Array(),
@@ -187,15 +187,18 @@ it("normal integration recovers a spherical cap on a flat body", async () => {
 });
 
 it("breast caps: fitted through a tilt, and added to the bust section", async () => {
-  const { capHeight, fitCaps, withCaps } = await import("./breast");
+  const { capHeight, fitCaps, withCaps, CAP_RATIO } = await import("./breast");
   const G = 80, m = 0.004, d = new Float32Array(G * G);
   for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
     const tilt = 0.0005 * (y - 40);   // the drawing leans relative to the body model
-    d[y * G + x] = tilt + capHeight(Math.hypot(x - 25, y - 35) * m, 0.06, 0.035) + capHeight(Math.hypot(x - 55, y - 35) * m, 0.06, 0.035);
+    d[y * G + x] = tilt + capHeight(Math.hypot(x - 25, y - 35) * m, 0.06, 0.06) + capHeight(Math.hypot(x - 55, y - 35) * m, 0.06, 0.06);
   }
   // Image px = grid cells × 2 (side 160 px, origin 0).
-  const caps = fitCaps({ d, x0: 0, y0: 0, side: 160, grid: G, mPerCell: m }, { l: { x: 45, y: 65 }, r: { x: 115, y: 65 }, a: 30 })!;
-  expect(caps.h).toBeCloseTo(0.035, 2);
+  const caps = fitCaps({ d, x0: 0, y0: 0, side: 160, grid: G, mPerCell: m }, { l: { x: 45, y: 65 }, r: { x: 115, y: 65 }, a: 40 })!;
+  // A full hemisphere (projection = base radius), not the prior's 0.75: the data wins.
+  expect(caps.h).toBeGreaterThan(0.055);
+  expect(caps.h).toBeLessThan(0.065);
+  expect(caps.h).toBeGreaterThan(CAP_RATIO * caps.aM * 1.15);
   expect(caps.aM).toBeCloseTo(0.06, 2);
   expect(caps.l.x).toBeCloseTo(51, -1);
 
@@ -206,4 +209,38 @@ it("breast caps: fitted through a tilt, and added to the bust section", async ()
   const grown = perimeter(withCaps(box, 1, caps2)) - perimeter(box);
   expect(grown).toBeGreaterThan(0.02);
   expect(grown).toBeLessThan(0.08);
+
+  // On a round chest the caps lean outwards with the wall, so they add more than on a flat front.
+  const round = convexHull(Array.from({ length: 64 }, (_, k) => [0.15 * Math.cos((2 * Math.PI * k) / 64), 0.1 * Math.sin((2 * Math.PI * k) / 64)]).flat());
+  const side = [-0.11, 0.11].map((x) => ({ x, dz: 0, aM: 0.06, h: 0.045 }));
+  expect(perimeter(withCaps(round, 1, side))).toBeGreaterThan(perimeter(round) + 0.02);
+});
+
+// The worker's chest pipeline on a synthetic torso: analytic normals → integration (worker settings) → caps.
+it("breast pipeline recovers cap height on a round torso (production settings)", async () => {
+  const { capHeight, fitCaps } = await import("./breast");
+  const { integrateNormals } = await import("./normals");
+  const G = 160, m = 0.0034, half = 50, torso = 132, top = 10, cx = 80;   // px = cells
+  const run = (hTrue: number, aTrue = 0.06) => {
+    const H = (x: number, y: number) => {
+      const X = (x - cx) * m, wall = 0.1 * Math.sqrt(Math.max(0, 1 - (X / 0.2) ** 2));   // elliptical torso front
+      const bust = (sx: number) => capHeight(Math.hypot(x - (cx + sx), y - 62) * m, aTrue, hTrue);
+      return wall + (hTrue > 0 ? bust(-27) + bust(27) : 0);
+    };
+    const n = { x: new Float32Array(G * G), y: new Float32Array(G * G), z: new Float32Array(G * G) }, mask = new Uint8Array(G * G);
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+      const i = y * G + x, gx = (H(x + 0.5, y) - H(x - 0.5, y)) / m, gy = (H(x, y + 0.5) - H(x, y - 0.5)) / m, l = Math.hypot(gx, gy, 1);
+      n.x[i] = -gx / l; n.y[i] = gy / l; n.z[i] = 1 / l;
+      mask[i] = y > top && y < top + 0.75 * torso && Math.abs(x - cx) < half ? 1 : 0;
+    }
+    const lambda = new Float32Array(G * G).fill(1e-6), h = integrateNormals(n, mask, new Float32Array(G * G), lambda, G, m);
+    const d = new Float32Array(G * G); for (let i = 0; i < G * G; i++) d[i] = mask[i] ? h[i] : NaN;
+    const at = (u: number, v: number) => ({ x: cx - v * half, y: top + u * torso });
+    return fitCaps({ d, x0: 0, y0: 0, side: G, grid: G, mPerCell: m }, { l: at(0.35, 0.5), r: at(0.35, -0.5), a: 0.6 * half })!;
+  };
+  for (const hTrue of [0.07, 0.045, 0.025]) {
+    const c = run(hTrue, hTrue > 0.05 ? 0.075 : 0.06);
+    expect(Math.abs(c.h - hTrue) / hTrue, `h ${hTrue}: got ${c.h.toFixed(3)} a ${c.aM.toFixed(3)} conf ${c.conf.toFixed(2)}`).toBeLessThan(0.2);
+  }
+  expect(run(0).h).toBeLessThan(0.008);
 });

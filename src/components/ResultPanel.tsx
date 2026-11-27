@@ -65,10 +65,14 @@ export function ResultPanel() {
             const k = heightCm / analysis.rest.statureM, h = landmarks.breast.h * k;   // cm per body-model metre
             return (
               <div className="grid grid-cols-[1fr_auto_5.5rem] items-center gap-2 text-sm">
-                <span>胸の出っぱり <Badge variant="outline" className="ml-1 align-middle">{same(landmarks.breast, auto.breast) ? "自動" : "修正"}</Badge></span>
+                <span>胸の出っぱり <Badge variant="outline" className="ml-1 align-middle">{same(landmarks.breast, auto.breast) ? CAP_SOURCE[landmarks.breast.src] : "修正"}</Badge>
+                  {same(landmarks.breast, auto.breast) && landmarks.breast.src !== "prior" && <span className="ml-1 text-xs text-muted-foreground">確からしさ {Math.round(landmarks.breast.conf * 100)}%</span>}</span>
                 <span className="text-right font-semibold tabular-nums">{f1(h)} cm</span>
                 <Input aria-label="胸の出っぱりを入力" type="number" step={0.1} min={0} className="h-7 text-right" value={f1(h)}
-                  onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 0) setLandmarks((l) => ({ ...l, breast: { ...l.breast!, h: v / k } })); }} />
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v >= 0) setLandmarks((l) => ({ ...l, breast: { ...l.breast!, h: v / k } }));
+                  }} />
               </div>
             );
           })()}
@@ -110,6 +114,7 @@ export function ResultPanel() {
   );
 }
 
+const CAP_SOURCE = { normals: "法線から", outline: "輪郭から", prior: "仮の値" } as const;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 function download(href: string, name: string) {

@@ -40,7 +40,7 @@ export type Analysis = {
   /** Rest-pose sections every 1 cm; t = height above mid-hip (m); line2d = where the section lies in the image. */
   sections: { t: number; hull: Float32Array; armContact: number; line2d: Line2d | null }[];
   /**
-   * The chest surface from surface normals relative to the posed body: d (grid × grid, m towards the camera) over
+   * The chest surface integrated from surface normals: d (grid × grid, height in m towards the camera) over
    * the image square at (x0, y0) of `side` px (NaN outside the chest); mPerCell = metres per grid cell at the
    * chest. caps: the two spherical caps fitted to it, in image px.
    */

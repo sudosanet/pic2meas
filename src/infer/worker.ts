@@ -6,7 +6,7 @@ import { armCutouts, autoLevels, bodyFrame, edgeAlong, extent, insideRange, J, l
 import { fitScales, ratios3d, type Ratios } from "@/lib/fit";
 import { decodeSimcc, mergeCoco, POSE_H, POSE_W } from "@/lib/keypoints";
 import { integrateNormals, rasterDepth } from "@/lib/normals";
-import { fitCaps, type Caps } from "@/lib/breast";
+import { CAP_RATIO, capLine, fitCaps, MIN_CAP_M, type Caps } from "@/lib/breast";
 import { configureOrt, MODELS } from "@/lib/models";
 import type { Analysis, Backend, InferApi, Progress } from "./types";
 
@@ -16,7 +16,7 @@ const MAX_SIDE = 1600, SEG = 512, CROP = 288;
 const LABEL = { background: 0, skirt: 5, dress: 7, face: 11 } as const;
 // ATR classes that never belong to the chest surface: hair, face, bare arms, bag, scarf.
 const NOT_CHEST = new Set([2, 11, 14, 15, 16, 17]);
-const NORMAL_SIZE = 512, BREAST_GRID = 160, MIN_CAP_H = 0.008;   // caps lower than 8 mm don't place the bust
+const NORMAL_SIZE = 512, BREAST_GRID = 160, OUTLINE_FROM = 0.5, MIN_CONF = 0.3, MAX_CAP_H = 0.12;   // outline used from this sin of the body's turn; fits below MIN_CONF are guesses
 const CACHE = "pic2meas-models";
 
 async function fetchModel(url: string, onProgress: (p: Progress) => void): Promise<Uint8Array> {
@@ -197,8 +197,8 @@ async function artKeypoints(m: Models, { canvas }: Img, box: { x0: number; x1: n
 }
 
 // The chest's shape from DAViD's surface normals (a square around the chest, 512 px), integrated on a 160 × 160
-// grid and anchored to the posed body's depth away from the breasts: `d` is how far the surface stands in front
-// of the body model there (m). Normals: x right, y up, z towards the camera.
+// grid: `d` is that surface's height (m, towards the camera; offset arbitrary). Normals: x right, y up, z towards
+// the camera.
 async function breastShape(m: Models, { canvas, w, h }: Img, labels: Uint8Array, body: Awaited<ReturnType<typeof recoverBody>>): Promise<Analysis["breast"]> {
   const j = body.joints2d, P = (i: number): Pt => ({ x: j[i * 2], y: j[i * 2 + 1] }), dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
   const sh = mid2(P(J.lShoulder), P(J.rShoulder)), hp = mid2(P(J.lHip), P(J.rHip)), torso = dist(sh, hp), half = dist(P(J.lShoulder), P(J.rShoulder)) / 2;
@@ -238,19 +238,52 @@ async function breastShape(m: Models, { canvas, w, h }: Img, labels: Uint8Array,
     if (!Number.isFinite(depth[i]) || label === LABEL.background || NOT_CHEST.has(label) || bones.some(([a, b]) => segD(p, a, b) < armR)) continue;
     mask[i] = 1; h0[i] = -depth[i];
     const u = (p.x - sh.x) * along.x + (p.y - sh.y) * along.y, v = (p.x - sh.x) * -along.y + (p.y - sh.y) * along.x;
-    roi[i] = u > 0.05 * torso && u < 0.65 * torso && Math.abs(v) < 0.75 * half ? 1 : 0;
-    lambda[i] = roi[i] ? 1e-4 : 1;
+    roi[i] = u > 0 && u < 0.75 * torso && Math.abs(v) < half ? 1 : 0;
+    // The shape is the normals' alone (a vanishing pull only fixes the offset): the body model's torso is rounder
+    // than most drawings and would sink the breasts. The torso's own curve is taken out when the caps are fitted.
+    lambda[i] = 1e-6;
   }
   const zc = median(Array.from(depth).filter((d, i) => roi[i] && Number.isFinite(d))), s = (zc / f) * (side / G);
   const hgt = integrateNormals(n, mask, h0, lambda, G, s);
   const d = new Float32Array(G * G);
-  for (let i = 0; i < G * G; i++) d[i] = roi[i] && mask[i] ? hgt[i] - h0[i] : NaN;
-  // Caps start where nipples usually are: 30 % down from the shoulders, half-way out to them.
+  for (let i = 0; i < G * G; i++) d[i] = roi[i] && mask[i] ? hgt[i] : NaN;
+  // Caps start where nipples usually are: a third of the way down from the shoulders, half-way out to them.
   const at = (u: number, v: number) => ({ x: sh.x + along.x * u * torso - along.y * v * half, y: sh.y + along.y * u * torso + along.x * v * half });
   const grid = { d, x0, y0, side, grid: G, mPerCell: s };
-  const init = { l: at(0.3, 0.5), r: at(0.3, -0.5), a: 0.44 * half };
-  // No usable surface: flat caps where the fit would have started, for the user to shape.
-  return { ...grid, caps: fitCaps(grid, init) ?? { ...init, aM: init.a * (s * G / side), h: 0 } };
+  // Largest base radius: from the shoulders, or the torso when the shoulders look narrow (a turned body).
+  const init = { l: at(0.35, 0.5), r: at(0.35, -0.5), a: Math.max(0.6 * half, 0.22 * torso) };
+  const mPerPx = (s * G) / side, guess = 0.5 * init.a;
+  // No usable surface: a guess where the fit would have started, for the user to shape.
+  // A fit the data barely supports (or none) is no estimate: a guess where it would have started, for the user to shape.
+  const fitted = fitCaps(grid, init), guessCaps: Caps = { ...init, a: guess, aM: guess * mPerPx, h: CAP_RATIO * guess * mPerPx, src: "prior", conf: fitted?.conf ?? 0 };
+  let caps: Caps = fitted && fitted.conf >= MIN_CONF ? fitted : guessCaps;
+
+  // Turned towards the side, the outline shows the projection directly: how far the person's front edge stands
+  // out beyond the body model's, at the breasts relative to below them, over the sine of the turn.
+  const cellAt = (p: Pt) => Math.round(((p.y - y0) / side) * G - 0.5) * G + Math.round(((p.x - x0) / side) * G - 0.5);
+  const depthNear = (p: Pt) => { const i = cellAt(p); return i >= 0 && i < G * G ? depth[i] : Infinity; };
+  const dz = depthNear(P(J.lShoulder)) - depthNear(P(J.rShoulder)), wide = 2 * half * (zc / f);
+  const sinTurn = Number.isFinite(dz) ? Math.abs(dz) / Math.hypot(dz, wide) : 0;
+  if (sinTurn >= OUTLINE_FROM) {
+    const perp = { x: -along.y, y: along.x }, nose = P(J.nose), neck = P(J.neck);
+    const fwd = Math.sign((nose.x - neck.x) * perp.x + (nose.y - neck.y) * perp.y) || 1;
+    const edgeAt = (u: number, inside: (q: Pt) => boolean) => {
+      const o = { x: sh.x + along.x * u * torso, y: sh.y + along.y * u * torso };
+      let k = 0;
+      while (k < torso && inside({ x: o.x + perp.x * fwd * (k + 1), y: o.y + perp.y * fwd * (k + 1) })) k++;
+      return { k, p: { x: o.x + perp.x * fwd * k, y: o.y + perp.y * fwd * k } };
+    };
+    const edge = (u: number, inside: (q: Pt) => boolean) => edgeAt(u, inside).k;
+    const onPerson = (q: Pt) => { const ix = Math.round(q.x), iy = Math.round(q.y); if (ix < 0 || iy < 0 || ix >= w || iy >= h) return false; const l = labels[iy * w + ix]; return l !== LABEL.background && !NOT_CHEST.has(l); };
+    const onBody = (q: Pt) => Number.isFinite(depthNear(q));
+    // Rows whose front edge is an arm (or what the hand holds) say nothing about the chest.
+    const out = (u: number) => { const e = edgeAt(u, onPerson); return bones.some(([a, b]) => segD(e.p, a, b) < 1.5 * armR) ? NaN : e.k - edge(u, onBody); };
+    const band = (a: number, b: number) => Array.from({ length: 8 }, (_, k) => out(a + ((b - a) * k) / 7)).filter(Number.isFinite);
+    const top = band(0.15, 0.45), low = band(0.5, 0.65);
+    const hOut = top.length >= 4 && low.length >= 2 ? ((Math.max(...top) - median(low)) * (zc / f)) / sinTurn : NaN;
+    if (hOut >= 0 && hOut <= MAX_CAP_H) caps = { ...caps, h: hOut, src: "outline", conf: sinTurn };
+  }
+  return { ...grid, caps };
 }
 
 const median = (a: ArrayLike<number>) => { const v = Array.from(a).filter(Number.isFinite).sort((p, q) => p - q); return v[v.length >> 1] ?? 0; };
@@ -313,14 +346,11 @@ function restGeometry(m: Models, { neutral, raised }: Awaited<ReturnType<typeof 
   };
 }
 
-// The bust at the caps' centres, the underbust at their lower edge (towards the hips in the image).
+// The bust at the caps' centres, the underbust a base radius below.
 function capLevels(sections: Analysis["sections"], caps: Caps | null): [number?, number?] {
-  if (!caps || caps.h < MIN_CAP_H) return [];
-  const c = mid2(caps.l, caps.r), dx = caps.r.x - caps.l.x, dy = caps.r.y - caps.l.y, len = Math.hypot(dx, dy) || 1;
-  let down = { x: -dy / len, y: dx / len };
-  if (down.y < 0) down = { x: -down.x, y: -down.y };
-  const b = sectionNear(sections, c), u = sectionNear(sections, { x: c.x + down.x * caps.a, y: c.y + down.y * caps.a });
-  return [sections[b]?.t, sections[u]?.t];
+  if (!caps || caps.aM < MIN_CAP_M) return [];
+  const { mid, below } = capLine(caps);
+  return [sections[sectionNear(sections, mid)]?.t, sections[sectionNear(sections, below)]?.t];
 }
 
 // Projected mesh silhouette. Triangles get the same winding so front and back faces don't cancel, and are

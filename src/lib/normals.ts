@@ -45,8 +45,7 @@ export function integrateNormals(n: { x: Float32Array; y: Float32Array; z: Float
     for (let k = 0; k < N; k++) out[k] = diag[k] * v[k];
     for (const [k, l] of edges) { out[k] -= v[l]; out[l] -= v[k]; }
   };
-  const h = new Float64Array(N);
-  for (let k = 0; k < N; k++) h[k] = h0[cells[k]];
+  const h = new Float64Array(N);   // starts flat: modes the solver doesn't reach stay flat rather than copying h0
   const r = new Float64Array(N), p = new Float64Array(N), Ap = new Float64Array(N);
   A(h, Ap);
   for (let k = 0; k < N; k++) { r[k] = b[k] - Ap[k]; p[k] = r[k]; }

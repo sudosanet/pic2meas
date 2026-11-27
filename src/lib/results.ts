@@ -1,10 +1,10 @@
 // Landmarks (automatic or hand-corrected) → measurements. Everything is measured along the skeleton, and photos
 // use the unposed standing body, so leaning, bent or sitting poses measure like upright ones.
 import type { Analysis } from "@/infer/types";
-import { capVolume, withCaps, type Caps } from "./breast";
+import { capLine, capVolume, MIN_CAP_M, withCaps, type Caps } from "./breast";
 import { jisBraSize, type BraSize } from "./cup";
 import { FLAGS } from "./flags";
-import { arcTo, J, lengthCategory, lerp2, LEVEL_LABEL, LEVELS, mid2, onPolyline, perimeter, sectionWidth, type Level, type Pt } from "./measure";
+import { arcTo, J, lengthCategory, lerp2, LEVEL_LABEL, LEVEL_PRIOR, LEVELS, mid2, onPolyline, perimeter, sectionWidth, type Level, type Pt } from "./measure";
 
 export type Mode = "photo" | "illust";
 export type Side = { l: Pt; r: Pt };
@@ -84,6 +84,14 @@ function capsOnSection(a: Analysis, lm: Pick<Landmarks, "hip">, hull: Float32Arr
   });
 }
 
+/**
+ * Illustrations' cup (0 = AA, 1 = A, …) from the caps' projection (cm) and the hip girth (cm): least squares over
+ * 118 Blue Archive characters' cups (as estimated from their art by a profile site; the game publishes none).
+ * Leave-one-out: mean error 2.1 cups (constant guess 3.0), exact 15 / ±1 46 of 118. Drawings with fuller figures
+ * get rounder bodies from the body model, so the hip carries much of it.
+ */
+export const ILLUST_CUP = { c0: -28.10, h: 0.258, hip: 0.326 };
+
 /** Girth growth of the rib cage from the underbust to the bust line, without breasts (calibrated in eval/). */
 export const RIB_GROWTH = 0.06;
 
@@ -100,17 +108,62 @@ export function autoLandmarks(a: Analysis): Landmarks {
     const t = a.sections[a.autoLevels[lv]]?.t ?? 0, l = levelAt(a, { hip }, t);
     return [lv, { t, a: l?.a ?? -40, b: l?.b ?? 40 }];
   })) as Record<Level, LevelLine>;
-  return {
+  // No garment: the skirt's waist starts at the body's (narrowest) waist.
+  const naturalWaist = levelAt(a, { hip }, levels.waist.t)?.c ?? lerp2(sp.neck, sp.hip, 0.62);
+  const lm: Landmarks = {
     headTop: f.headTop,
     chin: f.chin ?? lerp2(f.headTop, sp.neck, 0.8),
     sole: f.sole,
-    waist: f.waist ?? lerp2(sp.neck, sp.hip, 0.62),
+    waist: f.waist ?? naturalWaist,
     // A hem missing on one leg mirrors the other; with no garment it starts at the knees.
     hem: { l: f.hem.l ?? f.hem.r ?? knee.l, r: f.hem.r ?? f.hem.l ?? knee.r },
     crotch: lerp2(sp.hip, mid2(knee.l, knee.r), a.rest.crotchF),
     hip, knee, ankle: side(a, J.lAnkle, J.rAnkle), levels,
     breast: FLAGS.breast ? a.breast.caps : null,
   };
+  return followWaist(a, followCaps(a, lm));
+}
+
+/** A level line at the section nearest image point p (its own ends), or the current line if there is none. */
+const lineAt = (a: Analysis, lm: Pick<Landmarks, "hip">, p: Pt, fallback: LevelLine): LevelLine => {
+  const l = levelNear(a, lm, p);
+  return l ? { t: l.t, a: l.a, b: l.b } : fallback;
+};
+const lineAtT = (a: Analysis, lm: Pick<Landmarks, "hip">, t: number, fallback: LevelLine): LevelLine => {
+  const l = levelAt(a, lm, t);
+  return l ? { t: l.t, a: l.a, b: l.b } : fallback;
+};
+
+/** The bust line through the caps' centres and the underbust a base radius below them (≥ 3 cm lower). */
+export function followCaps(a: Analysis, lm: Landmarks): Landmarks {
+  if (!lm.breast || lm.breast.aM < MIN_CAP_M) return lm;
+  const { mid, below } = capLine(lm.breast), bust = lineAt(a, lm, mid, lm.levels.bust);
+  let underbust = lineAt(a, lm, below, lm.levels.underbust);
+  if (underbust.t > bust.t - LEVEL_PRIOR.gap) underbust = lineAtT(a, lm, bust.t - LEVEL_PRIOR.gap, underbust);
+  return { ...lm, levels: { ...lm.levels, bust, underbust } };
+}
+
+/** How far (m) the skirt's top may be from the body's narrowest waist and still be the same waist. */
+export const WAIST_LINK = 0.06;
+
+/**
+ * The waist girth at the waist point (the one the skirt is measured from) when that point is the body's waist,
+ * i.e. near its narrowest section; a low or high skirt top keeps the girth at the narrowest section. Kept ≥ 3 cm
+ * below the underbust.
+ */
+export function followWaist(a: Analysis, lm: Landmarks): Landmarks {
+  const natural = a.sections[a.autoLevels.waist]?.t ?? lm.levels.waist.t;
+  let waist = lineAt(a, lm, lm.waist, lm.levels.waist);
+  if (Math.abs(waist.t - natural) > WAIST_LINK) waist = lineAtT(a, lm, natural, lm.levels.waist);
+  const top = lm.levels.underbust.t - LEVEL_PRIOR.gap;
+  if (waist.t > top) waist = lineAtT(a, lm, top, waist);
+  return { ...lm, levels: { ...lm.levels, waist } };
+}
+
+/** Whether the waist point lies on the waist girth line (else it is just the skirt's top). */
+export function waistLinked(a: Analysis, lm: Landmarks) {
+  const l = levelNear(a, lm, lm.waist);
+  return !!l && Math.abs(l.t - lm.levels.waist.t) < 0.015;
 }
 
 export type Detail = { label: string; value: number; unit: "cm" | "%" | "cc" | "" };
@@ -176,6 +229,10 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     };
   }
 
+  // Caps the image couldn't support are a placeholder: no cup from them until the user shapes them.
+  const breastEdited = !!lm.breast && !same(lm.breast, auto.breast);
+  const guessedBreast = st.mode === "photo" && FLAGS.breast && !!lm.breast && lm.breast.src === "prior" && !breastEdited && ov.girth.bust == null;
+  if (guessedBreast) warnings.push("胸の形を画像から推定できませんでした。円と「胸の出っぱり」を合わせるとカップを計算します。");
   const girth = Object.fromEntries(LEVELS.map((lv) => {
     if (ov.girth[lv] != null) return [lv, { cm: ov.girth[lv]!, source: "manual" }];
     const line = lm.levels[lv];
@@ -193,6 +250,13 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
     const edited = !same(line, auto.levels[lv]) || (lv === "bust" && !same(lm.breast, auto.breast));
     return [lv, { cm: perimeter(hull, sx) * k, source: edited ? "edited" : "auto" }];
   })) as Results["girth"];
+
+  // Illustrations: the bust follows the drawing's cup, from the caps' projection and the hip girth (see ILLUST_CUP).
+  if (st.mode === "illust" && FLAGS.breast && lm.breast && ov.girth.bust == null) {
+    const hCm = lm.breast.src === "prior" && !breastEdited ? 0 : lm.breast.h * k;
+    const cup = ILLUST_CUP.c0 + ILLUST_CUP.h * hCm + ILLUST_CUP.hip * girth.hip.cm;
+    girth.bust = { cm: girth.underbust.cm + Math.max(0, 7.5 + 2.5 * cup), source: girth.bust.source };
+  }
 
   const skirtEdited = !same([lm.waist, lm.hem, lm.hip, lm.knee, lm.ankle], [auto.waist, auto.hem, auto.hip, auto.knee, auto.ankle]);
   const category = lengthCategory(mean(uOf("l"), uOf("r")));
@@ -233,7 +297,7 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
 
   return {
     skirt, girth, details,
-    bra: girth.bust.cm > 0 && girth.underbust.cm > 0 ? jisBraSize(girth.bust.cm, girth.underbust.cm) : null,
+    bra: girth.bust.cm > 0 && girth.underbust.cm > 0 && !guessedBreast ? jisBraSize(girth.bust.cm, girth.underbust.cm) : null,
     headRatio: H / headCm, warnings,
   };
 }

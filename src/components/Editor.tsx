@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Group, Image as KImage, Layer, Line, Stage, Text } from "react-konva";
 import { editorStage } from "@/lib/editorStage";
 import { LEVELS, LEVEL_LABEL, mid2, type Level, type Pt } from "@/lib/measure";
-import { forMode, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
+import { followCaps, followWaist, forMode, waistLinked, levelAt, levelNear, spine, type Landmarks, type LevelLine } from "@/lib/results";
 import { useStore } from "@/store";
 
 const COLORS = { breast: "#db2777", head: "#64748b", crotch: "#7c3aed", waist: "#16a34a", hem: "#dc2626", level: "#d97706", joint: "#eab308", bone: "rgba(234,179,8,0.6)" };
@@ -82,7 +82,7 @@ export function Editor() {
           </Layer>
           {analysis && landmarks && (() => {
             const am = forMode(analysis, mode), lm = landmarks, sp = spine(am, lm);
-            const pt = (key: "headTop" | "chin" | "waist" | "crotch", label: string, color: string) => (
+            const pt = (key: "headTop" | "chin" | "crotch", label: string, color: string) => (
               <Handle p={lm[key]} u={u} color={color} label={label} onChange={(p) => set((l) => ({ ...l, [key]: p }))} />
             );
             const pair = (key: "hip" | "knee" | "ankle" | "hem" | "sole", label: string, color: string) => (["l", "r"] as const).map((s) => (
@@ -98,12 +98,20 @@ export function Editor() {
                 {layers.levels && LEVELS.map((lv) => (
                   <Level key={lv} line={lm.levels[lv]} u={u} label={LEVEL_LABEL[lv]}
                     at={(t) => levelAt(am, lm, t)} near={(p) => levelNear(am, lm, p)}
-                    onChange={(patch) => set((l) => ({ ...l, levels: { ...l.levels, [lv]: { ...l.levels[lv], ...patch } } as Record<Level, LevelLine> }))} />
+                    onChange={(patch) => set((l) => {
+                      const next = { ...l, levels: { ...l.levels, [lv]: { ...l.levels[lv], ...patch } } as Record<Level, LevelLine> };
+                      // The waist girth and the skirt's waist point are one waist: moving the line moves the point.
+                      const c = lv === "waist" && patch.t != null && waistLinked(am, l) ? levelAt(am, next, patch.t)?.c : undefined;
+                      return c ? { ...next, waist: c } : next;
+                    })} />
                 ))}
                 {layers.levels && lm.breast && (["l", "r"] as const).map((k) => (
                   <Cap key={k} c={lm.breast![k]} a={lm.breast!.a} u={u}
-                    onMove={(c) => set((l) => ({ ...l, breast: { ...l.breast!, [k]: c } }))}
-                    onRadius={(r) => set((l) => ({ ...l, breast: { ...l.breast!, a: r, aM: (l.breast!.aM / l.breast!.a) * r } }))} />
+                    onMove={(c) => set((l) => followCaps(am, { ...l, breast: { ...l.breast!, [k]: c } }))}
+                    onRadius={(r) => set((l) => {
+                      const aM = (l.breast!.aM / l.breast!.a) * r, ratio = l.breast!.h / l.breast!.aM;   // keep the shape, scale the size
+                      return followCaps(am, { ...l, breast: { ...l.breast!, a: r, aM, h: ratio * aM } });
+                    })} />
                 ))}
                 {pt("headTop", "頭頂", COLORS.head)}
                 {pt("chin", "あご", COLORS.head)}
@@ -112,7 +120,7 @@ export function Editor() {
                 {pair("knee", "", COLORS.joint)}
                 {pair("ankle", "", COLORS.joint)}
                 {pt("crotch", "股下", COLORS.crotch)}
-                {pt("waist", "ウエスト", COLORS.waist)}
+                <Handle p={lm.waist} u={u} color={COLORS.waist} label={waistLinked(am, lm) ? "ウエスト" : "スカート上端"} onChange={(p) => set((l) => followWaist(am, { ...l, waist: p }))} />
                 {pair("hem", "裾", COLORS.hem)}
               </Layer>
             );
