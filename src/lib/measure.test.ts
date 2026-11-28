@@ -47,7 +47,7 @@ function fakeAnalysis(rot: number): { a: Analysis; P: (p: Pt) => Pt } {
     P,
     a: {
       w: 400, h: 400, backend: "wasm", ms: { segment: 0, body: 0, breast: 0, sections: 0 }, transparent: false,
-      breast: { d: new Float32Array(0), x0: 0, y0: 0, side: 1, grid: 0, mPerCell: 0, caps: { l: P({ x: 185, y: 130 }), r: P({ x: 215, y: 130 }), a: 8, aM: 0.04, h: 0.03, src: "normals", conf: 1 } },
+      breast: { d: new Float32Array(0), x0: 0, y0: 0, side: 1, grid: 0, mPerCell: 0, caps: { l: P({ x: 185, y: 130 }), r: P({ x: 215, y: 130 }), a: 8, aM: 0.04, h: 0.03, src: "normals", conf: 1 }, relief: { sy: 0.1, down: 0.1 } },
       person: new Uint8Array(160000).fill(1), garment: new Uint8Array(160000), garmentKind: "skirt", cut: false, joints2d: j2,
       found, art: { joints2d: j2, found },
       meshPoints: new Float32Array(), meshMask: new Uint8Array(),

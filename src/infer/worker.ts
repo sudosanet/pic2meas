@@ -245,8 +245,12 @@ async function breastShape(m: Models, { canvas, w, h }: Img, labels: Uint8Array,
   }
   const zc = median(Array.from(depth).filter((d, i) => roi[i] && Number.isFinite(d))), s = (zc / f) * (side / G);
   const hgt = integrateNormals(n, mask, h0, lambda, G, s);
-  const d = new Float32Array(G * G);
-  for (let i = 0; i < G * G; i++) d[i] = roi[i] && mask[i] ? hgt[i] : NaN;
+  const d = new Float32Array(G * G), ny: number[] = [];
+  for (let i = 0; i < G * G; i++) { d[i] = roi[i] && mask[i] ? hgt[i] : NaN; if (roi[i] && mask[i]) ny.push(n.y[i]); }
+  // The relief straight from the normals (integrating and fitting caps loses much of it): how much their vertical
+  // part varies over the chest, and how far the undersides turn down.
+  const my = ny.reduce((a, v) => a + v, 0) / (ny.length || 1), downs = ny.map((v) => -v).sort((a, b) => a - b);
+  const relief = { sy: Math.sqrt(ny.reduce((a, v) => a + (v - my) ** 2, 0) / (ny.length || 1)), down: downs[Math.floor(0.9 * (downs.length - 1))] ?? 0 };
   // Caps start where nipples usually are: a third of the way down from the shoulders, half-way out to them.
   const at = (u: number, v: number) => ({ x: sh.x + along.x * u * torso - along.y * v * half, y: sh.y + along.y * u * torso + along.x * v * half });
   const grid = { d, x0, y0, side, grid: G, mPerCell: s };
@@ -283,7 +287,7 @@ async function breastShape(m: Models, { canvas, w, h }: Img, labels: Uint8Array,
     const hOut = top.length >= 4 && low.length >= 2 ? ((Math.max(...top) - median(low)) * (zc / f)) / sinTurn : NaN;
     if (hOut >= 0 && hOut <= MAX_CAP_H) caps = { ...caps, h: hOut, src: "outline", conf: sinTurn };
   }
-  return { ...grid, caps };
+  return { ...grid, caps, relief };
 }
 
 const median = (a: ArrayLike<number>) => { const v = Array.from(a).filter(Number.isFinite).sort((p, q) => p - q); return v[v.length >> 1] ?? 0; };

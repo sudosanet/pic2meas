@@ -45,7 +45,8 @@ export type Analysis = {
    * the image square at (x0, y0) of `side` px (NaN outside the chest); mPerCell = metres per grid cell at the
    * chest. caps: the two spherical caps fitted to it, in image px.
    */
-  breast: { d: Float32Array; x0: number; y0: number; side: number; grid: number; mPerCell: number; caps: Caps };
+  /** relief: the chest's normals directly (on its cells): spread of their vertical part, and how far they turn down. */
+  breast: { d: Float32Array; x0: number; y0: number; side: number; grid: number; mPerCell: number; caps: Caps; relief: { sy: number; down: number } };
   /** The body mesh's triangles (for the 3D view of rest.verts). */
   mesh: { faces: Int32Array };
   /** The posed mesh's projected neck and mid-hip, which line2d is relative to. */

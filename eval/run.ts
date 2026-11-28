@@ -144,6 +144,7 @@ async function internals(page: Page, heightCm: number) {
   return page.evaluate(async (H): Promise<Record<string, number | string>> => {
     const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("/src/store.ts"))!;
     const st = (await import(url)).useStore.getState(), a = st.analysis, b = st.landmarks?.breast, k = H / a.rest.statureM;   // cm per body-model metre
-    return { cut: a.cut ? 1 : 0, ...(b ? { capSrc: b.src, capConf: +b.conf.toFixed(2), capACm: +(b.aM * k).toFixed(2), capHCm: +(b.h * k).toFixed(2) } : {}) };
+    const rel: Record<string, number | string> = a.breast ? { sy: +a.breast.relief.sy.toFixed(4), down: +a.breast.relief.down.toFixed(4) } : {};
+    return { cut: a.cut ? 1 : 0, ...rel, ...(b ? { capSrc: b.src, capConf: +b.conf.toFixed(2), capACm: +(b.aM * k).toFixed(2), capHCm: +(b.h * k).toFixed(2) } : {}) };
   }, heightCm);
 }

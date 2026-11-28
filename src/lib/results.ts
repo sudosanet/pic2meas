@@ -112,8 +112,15 @@ export function capsIn3d(a: Analysis, lm: Pick<Landmarks, "hip">, caps: Caps, t:
  *   profile site estimated them from the art: the game publishes none). Fuller figures get rounder bodies from the
  *   body model, so the hip carries much of it.
  * underbust: the body model's runs large (photos: cup bias −3.4 → 0 at 0.89).
+ * Drawings use a cup model with the chest's relief read straight off the normals (Analysis.breast.relief), alone:
+ * Blue Archive cup error 2.17 → 1.96 (blending the shape back in dilutes it). Photos get worse with it: they keep the
+ * blend.
  */
-export const BUST = { shapeWeight: 0.3, underbust: 0.89, cup: { c0: -28.10, h: 0.258, hip: 0.326 } };
+export const BUST = {
+  shapeWeight: 0.3, underbust: 0.89,
+  cup: { c0: -28.10, h: 0.258, hip: 0.326 },
+  illustCup: { c0: -28.015, h: 0.369, hip: 0.303, sy: 13.249, down: -2.293 },
+};
 
 /**
  * Corrections shared by both modes, least squares against published sizes: waist and hip from 13 full-body photos
@@ -300,9 +307,10 @@ export function computeResults(a: Analysis, lm: Landmarks, auto: Landmarks, st: 
   let capScale = 1;
   if (FLAGS.breast && lm.breast && ov.girth.bust == null) {
     const hCm = lm.breast.src === "prior" && !breastEdited ? 0 : lm.breast.h * k;
-    const model = 7.5 + 2.5 * (BUST.cup.c0 + BUST.cup.h * hCm + BUST.cup.hip * hipRaw);
+    const relief = st.mode === "illust" ? a.breast?.relief : undefined, c = relief ? BUST.illustCup : BUST.cup;
+    const model = 7.5 + 2.5 * (c.c0 + c.h * hCm + c.hip * hipRaw + (relief ? BUST.illustCup.sy * relief.sy + BUST.illustCup.down * relief.down : 0));
     // Caps shaped by hand are taken as they are: the shape alone.
-    const w = breastEdited ? 1 : BUST.shapeWeight;
+    const w = breastEdited ? 1 : relief ? 0 : BUST.shapeWeight;
     const delta = Math.max(0, w * (girth.bust.cm - girth.underbust.cm) + (1 - w) * model);
     girth.bust = { cm: girth.underbust.cm + delta, source: girth.bust.source };
     // Caps scale f whose shape gives that bust (0 if even no caps measure more).
